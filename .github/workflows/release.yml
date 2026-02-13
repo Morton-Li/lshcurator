@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build-publish:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Build package
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+          python -m build
+
+      - name: Check if version is pre-release
+        id: check_version
+        run: |
+          version=${GITHUB_REF#refs/tags/v}
+
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+          lower_version=$(echo "$version" | tr '[:upper:]' '[:lower:]')
+          if [[ "$lower_version" == *"rc"* || "$lower_version" == *"alpha"* || "$lower_version" == *"beta"* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: steps.check_version.outputs.prerelease == 'false'
+        with:
+          tag_name: ${{ steps.check_version.outputs.tag }}
+          name: "lshcurator ${{ steps.check_version.outputs.version }} Release"
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload to PyPI
+        if: steps.check_version.outputs.prerelease == 'false'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          twine check dist/*
+          twine upload dist/*

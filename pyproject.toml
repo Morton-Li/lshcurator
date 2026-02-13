@@ -1,0 +1,39 @@
+[project]
+name = "lshcurator"
+dynamic = ["version"]
+description = "High-throughput MinHash + LSH toolkit for large-scale text corpus deduplication and dense near-duplicate mining."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+  {name = "Morton Li", email = "Morton.L@Outlook.com"}
+]
+keywords = [
+  "deduplication", "minhash", "lsh", "near-duplicate", "similarity", "shingling", "text", "corpus", "dataset", "data-curation",
+]
+classifiers = [
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "License :: OSI Approved :: Apache Software License",
+]
+dependencies = [
+  "numpy~=2.4.2", "datasketch~=1.9.0"
+]
+
+[project.urls]
+"Repository" = "https://github.com/Morton-Li/lshcurator"
+
+[project.optional-dependencies]
+dev = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["lshcurator"]
+
+[tool.hatch.version]
+path = "lshcurator/__init__.py"
+
+[build-system]
+requires = ["hatchling~=1.28.0"]
+build-backend = "hatchling.build"

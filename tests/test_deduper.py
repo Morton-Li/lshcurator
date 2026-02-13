@@ -1,7 +1,11 @@
 import struct
+import sys
+from pathlib import Path
 
 import numpy
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lshcurator import Deduper
 from lshcurator.utils import compute_minhash_signature, encode_band_key

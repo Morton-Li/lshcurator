@@ -67,8 +67,8 @@ class Bucket:
             shingle_step=self.shingle_step,
             compute_mode=self.compute_mode,
         ).hashvalues.astype(numpy.uint64, copy=False)
-        keys = numpy.empty(self.bands, dtype=numpy.uint64)  # 使用 np 以替代 list 降低开销
 
+        keys = numpy.empty(self.bands, dtype=numpy.uint64)  # 使用 np 以替代 list 降低开销
         for band_idx in range(self.bands):
             digest8_key = encode_band_key(
                 hash_values=hash_values,

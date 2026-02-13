@@ -33,6 +33,15 @@ class Deduper:
         self._bucket_keys.sort()
         self._buckets: dict[int, BucketState] = {}
 
+    @property
+    def bucket_keys(self) -> numpy.ndarray: return self._bucket_keys
+    @property
+    def buckets(self) -> dict[int, BucketState]: return self._buckets
+    @property
+    def num_buckets(self) -> int: return len(self._buckets)
+    @property
+    def num_bucket_keys(self) -> int: return self._bucket_keys.size
+
     def __call__(self, text: str) -> bool:
         hash_values = compute_minhash_signature(
             text=text,

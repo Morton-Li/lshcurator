@@ -54,5 +54,5 @@ def encode_band_key(hash_values: numpy.ndarray, rows_per_band: int, band_idx: in
     hash_values_bytes = hash_values[start:end].tobytes()
     if output_type == 'raw': return prefix + hash_values_bytes
     elif output_type == 'digest8': return hashlib.blake2b(hash_values_bytes, digest_size=8, person=prefix).digest()
-    else: raise ValueError(f'Invalid output_type: {output_type}, expected "raw" or "digest"')
+    else: raise ValueError(f'Invalid output_type: {output_type}, expected "raw" or "digest8"')
 

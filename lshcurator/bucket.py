@@ -33,7 +33,6 @@ class Bucket:
                 "char" for character-level shingles, "byte" for byte-level shingles.
                 计算模式，"char" 表示按字符切割 shingles，"byte" 表示按字节切割 shingles。
         """
-        # self._keys: list[numpy.uint64] = []
         self._keys: numpy.ndarray = numpy.empty(1_000_000, dtype=numpy.uint64)  # 使用 np 替代 list 降低开销
         self._keys_written: int = 0  # 记录 keys 已写入长度指针
 

@@ -79,6 +79,10 @@ class Bucket:
             keys[band_idx] = numpy.frombuffer(digest8_key, dtype='<u8', count=1)[0]
         self.append_keys(keys)
 
+    def batch_insert(self, texts: list[str]) -> None:
+        """Insert a batch of texts into the LSH buckets."""
+        for text in texts: self.insert(text)
+
     def extract_keys(self, min_hit_count: int | None = None) -> numpy.ndarray:
         """Extract the bucket keys as a numpy array."""
         data = self._keys[:self._keys_written].copy()  # 只考虑已写入部分

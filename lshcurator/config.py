@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+import numpy
+
 from .utils.types import ComputeMode
 
 
@@ -29,12 +31,4 @@ class BucketConfig:
     bands: int
     rows_per_band: int
     compute_mode: ComputeMode = 'char'
-
-    def to_dict(self) -> dict[str, int | ComputeMode]:
-        return {
-            'shingle_k': self.shingle_k,
-            'shingle_step': self.shingle_step,
-            'bands': self.bands,
-            'rows_per_band': self.rows_per_band,
-            'compute_mode': self.compute_mode,
-        }
+    dtype: numpy.dtype = numpy.uint64

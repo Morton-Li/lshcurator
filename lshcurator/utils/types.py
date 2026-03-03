@@ -1,6 +1,10 @@
 from dataclasses import dataclass
+from typing import TypeAlias, Literal
 
 import numpy
+
+
+ComputeMode: TypeAlias = Literal['char', 'byte']
 
 
 @dataclass(slots=True)

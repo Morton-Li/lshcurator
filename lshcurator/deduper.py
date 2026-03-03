@@ -2,8 +2,8 @@ from typing import Literal
 
 import numpy
 
-from .types import BucketState
-from .utils import compute_minhash_signature, encode_band_key
+from .algorithms import compute_minhash_signature, encode_band_key
+from .utils.types import BucketState
 
 
 class Deduper:

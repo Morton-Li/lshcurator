@@ -27,6 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = []
+pd = ["pandas~=3.0.1", "pyarrow~=23.0.1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["lshcurator"]

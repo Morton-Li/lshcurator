@@ -1,18 +1,24 @@
 import threading
 from abc import ABC, abstractmethod
 from multiprocessing import shared_memory
+from pathlib import Path
 from time import sleep
+from typing import Literal
 
 import numpy
 
 from .algorithms import compute_minhash_signature, compute_band_keys
 from .config import BucketConfig
-from .utils.types import BucketShardMemorySpec, ShmBucketReport, ShmBucketQueueGroups, ShmBucketCommand
+from .utils.readers import iter_parquet_batches, iter_jsonl_rows
+from .utils.types import BucketShardMemorySpec, ShmBucketReport, ShmBucketQueueGroups, ShmBucketCommand, ComputeMode
 
 
 class BucketBase(ABC):
     """Abstract base class for LSH buckets."""
     def __init__(self, config: BucketConfig):
+        if config.compute_mode not in ComputeMode:
+            raise ValueError(f"Invalid compute_mode: {config.compute_mode}. Must be one of {ComputeMode}")
+
         self.cfg = config
 
         self._keys: numpy.ndarray
@@ -177,4 +183,60 @@ class ShmBucket(BucketBase):
             self._keys[self._keys_written:new_len] = keys
             self._keys_written = new_len
 
+    def run_job(
+        self,
+        file_path: Path,
+        field_name: str | list[str],
+        file_format: Literal['parquet', 'jsonl'] = 'parquet',
+        **kwargs
+    ) -> None:
+        """批量插入文本并在完成后向上游报告状态"""
+        if isinstance(field_name, str): field_name = [field_name]
+
+        if file_format == 'parquet':
+            for batch in iter_parquet_batches(
+                parquet_path=file_path,
+                batch_size=kwargs.get('batch_size', 2048),
+                text_field=field_name,
+            ):
+                for sample in batch.stack().replace(r'^\s*$', numpy.nan, regex=True).dropna().reset_index(drop=True):
+                    while self.bucket_status != 'ready' and self.bucket_status != 'Exit': sleep(1)
+                    if self.bucket_status == 'Exit': return None  # 如果在等待过程中收到退出命令，直接返回不执行写入
+                    self.insert(text=sample)
+        elif file_format == 'jsonl':
+            for row in iter_jsonl_rows(file_path=file_path):
+                for field in field_name:
+                    while self.bucket_status != 'ready' and self.bucket_status != 'Exit': sleep(1)
+                    if self.bucket_status == 'Exit': return None  # 如果在等待过程中收到退出命令，直接返回不执行写入
+                    content = row.get(field, None)
+                    if isinstance(content, str): self.insert(text=content)
+        else: raise ValueError(f"Unsupported file format: {file_format}")
+
+        # 向上游报告完成状态
+        self.queue_group.report_queue.put(ShmBucketReport(
+            bucket_id=self.bucket_id,
+            ShmSpec=self._shm_spec,
+            written=self.keys_written,
+            status='complete',
+            message=f"Bucket {self.bucket_id} completed job with {self.keys_written} keys",
+        ))
+        # 防止在报告完成后继续接受命令导致数据混用
+        self.clear()
+        return None
+
     def clear(self) -> None: self._keys_written = 0  # 只需重置写入指针，实际数据会被覆盖无需清零
+
+
+def bucket_worker(
+    config: BucketConfig,
+    shm_spec: BucketShardMemorySpec,
+    queue_group: ShmBucketQueueGroups,
+    job_kwargs: dict,
+    bucket_id: int = 0,
+) -> None:
+    """Bucket 进程的主函数，负责创建 ShmBucket 实例并运行任务"""
+    bucket = ShmBucket(config=config, shm_spec=shm_spec, queue_group=queue_group, bucket_id=bucket_id)
+    bucket.run_job(**job_kwargs)
+
+
+__all__ = ['Bucket', 'ShmBucket', 'bucket_worker']

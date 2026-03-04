@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from multiprocessing import Queue
+from multiprocessing.queues import Queue
 from typing import TypeAlias, Literal
 
 import numpy

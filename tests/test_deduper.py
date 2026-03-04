@@ -8,7 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from lshcurator import Deduper
-from lshcurator.utils import compute_minhash_signature, encode_band_key
+from lshcurator.algorithms import compute_minhash_signature, encode_band_key
 
 
 def test_similarity_threshold_validation():

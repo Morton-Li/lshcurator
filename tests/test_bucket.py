@@ -6,16 +6,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lshcurator import Bucket
+from lshcurator import Bucket, BucketConfig
 
 
 def test_invalid_compute_mode_raises():
     with pytest.raises(ValueError):
-        Bucket(shingle_k=5, shingle_step=1, bands=8, rows_per_band=4, compute_mode="token")  # type: ignore[arg-type]
+        bucket_config = BucketConfig(shingle_k=5, shingle_step=1, bands=8, rows_per_band=4, compute_mode="invalid_mode")
+        Bucket(config=bucket_config)  # type: ignore[arg-type]
 
 
 def test_append_keys_resizes_and_keeps_existing_data():
-    b = Bucket(shingle_k=5, shingle_step=1, bands=4, rows_per_band=4, compute_mode="char")
+    bucket_config = BucketConfig(shingle_k=5, shingle_step=1, bands=4, rows_per_band=4, compute_mode="char")
+    b = Bucket(config=bucket_config)
     b._keys = numpy.empty(4, dtype=numpy.uint64)
     b._keys_written = 0
 
@@ -33,7 +35,8 @@ def test_append_keys_resizes_and_keeps_existing_data():
 
 def test_insert_same_text_twice_extract_min_hit_count():
     bands, rows = 8, 4
-    b = Bucket(shingle_k=5, shingle_step=1, bands=bands, rows_per_band=rows, compute_mode="byte")
+    bucket_config = BucketConfig(shingle_k=5, shingle_step=1, bands=bands, rows_per_band=rows, compute_mode="byte")
+    b = Bucket(config=bucket_config)
     b._keys = numpy.empty(64, dtype=numpy.uint64)
     b._keys_written = 0
 
@@ -48,7 +51,8 @@ def test_insert_same_text_twice_extract_min_hit_count():
 
 
 def test_extract_keys_filters_counts_correctly():
-    b = Bucket(shingle_k=5, shingle_step=1, bands=4, rows_per_band=4, compute_mode="char")
+    bucket_config = BucketConfig(shingle_k=5, shingle_step=1, bands=4, rows_per_band=4, compute_mode="char")
+    b = Bucket(config=bucket_config)
     b._keys = numpy.empty(16, dtype=numpy.uint64)
     b._keys_written = 0
 
@@ -60,7 +64,8 @@ def test_extract_keys_filters_counts_correctly():
 
 
 def test_clear_resets_state():
-    b = Bucket(shingle_k=5, shingle_step=1, bands=4, rows_per_band=4, compute_mode="char")
+    bucket_config = BucketConfig(shingle_k=5, shingle_step=1, bands=4, rows_per_band=4, compute_mode="char")
+    b = Bucket(config=bucket_config)
     b._keys = numpy.empty(8, dtype=numpy.uint64)
     b._keys_written = 0
     b.append_keys(numpy.array([7, 8, 9], dtype=numpy.uint64))

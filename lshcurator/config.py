@@ -32,3 +32,19 @@ class BucketConfig:
     rows_per_band: int
     compute_mode: ComputeMode = 'char'
     dtype: numpy.dtype = numpy.uint64
+
+
+@dataclass(frozen=True, slots=True)
+class CuratorConfig:
+    shingle_k: int
+    shingle_step: int
+    bands: int
+    rows_per_band: int
+    compute_mode: ComputeMode = 'char'
+
+    max_workers: int = 8
+    chunk_elements: int = 1_000_000  # 每次分配共享内存的元素数量
+    dtype: numpy.dtype = numpy.uint64
+
+    @property
+    def shm_chunk_nbytes(self) -> int: return self.chunk_elements * self.dtype.itemsize

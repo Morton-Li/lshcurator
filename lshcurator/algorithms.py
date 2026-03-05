@@ -1,5 +1,18 @@
+# Copyright 2026 Morton Li. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import hashlib
-from typing import Generator, Any, Literal, Callable
+from typing import Literal, Callable, Iterator
 
 import numpy
 from datasketch import MinHash
@@ -7,7 +20,7 @@ from datasketch import MinHash
 from .utils.types import ComputeMode
 
 
-def iter_char_shingles(text: str, *, k_gram: int, step: int = 1) -> Generator[bytes, Any, None]:
+def iter_char_shingles(text: str, *, k_gram: int, step: int = 1) -> Iterator[bytes]:
     """Character-level k-gram shingles."""
     n = len(text)
     if n < k_gram: return
@@ -15,7 +28,7 @@ def iter_char_shingles(text: str, *, k_gram: int, step: int = 1) -> Generator[by
         yield text[i:i + k_gram].encode("utf-8", errors="ignore")
 
 
-def iter_byte_shingles(text: str, *, k_gram: int, step: int = 1) -> Generator[bytes, Any, None]:
+def iter_byte_shingles(text: str, *, k_gram: int, step: int = 1) -> Iterator[bytes]:
     """Byte-level k-gram shingles."""
     data = text.encode("utf-8", errors="ignore")
     n = len(data)
@@ -24,7 +37,7 @@ def iter_byte_shingles(text: str, *, k_gram: int, step: int = 1) -> Generator[by
         yield data[i:i + k_gram]
 
 
-COMPUTE_FN_MAPPING: dict[ComputeMode, Callable[..., Generator[bytes, Any, None]]] = {
+COMPUTE_FN_MAPPING: dict[ComputeMode, Callable[..., Iterator[bytes]]] = {
     'char': iter_char_shingles,
     'byte': iter_byte_shingles,
 }

@@ -1,3 +1,16 @@
+# Copyright 2026 Morton Li. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import threading
 from abc import ABC, abstractmethod
 from multiprocessing import shared_memory
@@ -10,14 +23,14 @@ import numpy
 from .algorithms import compute_minhash_signature, compute_band_keys
 from .config import BucketConfig
 from .utils.readers import iter_parquet_batches, iter_jsonl_rows
-from .utils.types import BucketShardMemorySpec, ShmBucketReport, ShmBucketQueueGroups, ShmBucketCommand, ComputeMode
+from .utils.types import BucketShardMemorySpec, ShmBucketReport, ShmBucketQueueGroups, ShmBucketCommand, ComputeModeSet
 
 
 class BucketBase(ABC):
     """Abstract base class for LSH buckets."""
     def __init__(self, config: BucketConfig):
-        if config.compute_mode not in ComputeMode:
-            raise ValueError(f"Invalid compute_mode: {config.compute_mode}. Must be one of {ComputeMode}")
+        if config.compute_mode not in ComputeModeSet:
+            raise ValueError(f"Invalid compute_mode: {config.compute_mode}. Must be one of {ComputeModeSet}")
 
         self.cfg = config
 
@@ -118,10 +131,15 @@ class ShmBucket(BucketBase):
         self._command_listener_thread = threading.Thread(target=self._listen_for_commands, daemon=True)
         self._command_listener_thread.start()
 
+    @property
+    def paused(self) -> bool: return self.bucket_status not in ['ready', 'Exit']
+
     def _listen_for_commands(self) -> None:
         """监听上游命令队列"""
-        while True:
-            command: ShmBucketCommand = self.queue_group.command_queue.get()  # 阻塞等待命令
+        while self.paused:
+            if self.bucket_status == 'Exit': break  # 如果已经是 Exit 状态，直接退出线程
+            command: ShmBucketCommand = self.queue_group.command_queue.get(timeout=1)  # 阻塞等待命令
+            if command is None: continue  # 收到 None 命令，可能是信号或占位，忽略
             if command.action == '<|Exit|>':
                 self.bucket_status = 'Exit'
                 self._shm.close()
@@ -135,23 +153,25 @@ class ShmBucket(BucketBase):
                 else:
                     print(f"Bucket {self.bucket_id} received unknown command: {command.action}")
 
-    def expand_shm(self) -> None:
-        """请求上游扩容共享内存区域以适应更多的 keys"""
-        self.bucket_status = 'requesting_expansion'
+    def ready(self, is_ready: bool = True) -> None: self.bucket_status = 'ready' if is_ready else 'not_ready'  # 直接设置状态，供外部调用以控制 bucket 是否接受写入
+
+    def _report_merge_request(self) -> None:
+        """向上游报告当前 bucket 的数据已准备好合并到全局 bucket keys 数组中"""
+        self.bucket_status = 'reporting_merge'
         self.queue_group.report_queue.put(ShmBucketReport(
             bucket_id=self.bucket_id,
             ShmSpec=self._shm_spec,
             written=self.keys_written,
             status='processing',
-            action='expand',
-            message=f"Bucket {self.bucket_id} requesting expansion to accommodate more keys",
+            action='merge',
+            message=f"Bucket {self.bucket_id} reporting ready for merge with {self.keys_written} keys",
         ))
-        # 等待上游返回 new_shm_spec 并刷新共享内存连接
-        while self.bucket_status != 'ready' and self.bucket_status != 'Exit': sleep(1)
+        while self.paused: sleep(1)  # 阻塞等待上游处理完成后状态变为 ready 或接到 Exit
+        self.clear()
 
     def refresh_shm(self, new_shm_spec: BucketShardMemorySpec) -> None:
         """刷新共享内存连接以适应新的共享内存区域，通常在上游扩容后调用"""
-        self.bucket_status = 'expanding'  # 扩容中
+        self.bucket_status = 'refreshing_shm'
         self._shm.close()  # 关闭当前共享内存连接
         self._shm_spec = new_shm_spec
         self._shm = shared_memory.SharedMemory(name=new_shm_spec.name, create=False)  # 连接到新的共享内存
@@ -162,8 +182,8 @@ class ShmBucket(BucketBase):
         self.bucket_status = 'ready'
 
     def append_keys(self, keys: numpy.ndarray) -> None:
-        while self.bucket_status != 'ready' and self.bucket_status != 'Exit': sleep(1)  # 等待状态变为 ready
-        if self.bucket_status == 'Exit': return  # 如果在等待过程中收到退出命令，直接返回不执行写入
+        while self.paused: sleep(1)  # 等待状态变为 ready
+        if self.bucket_status == 'Exit': return  # 收到退出命令
         if not isinstance(keys, numpy.ndarray): raise ValueError("Keys must be a numpy array")
         new_len = self.keys_written + len(keys)
         if new_len > self._keys.size:
@@ -172,12 +192,12 @@ class ShmBucket(BucketBase):
             if deficit < len(keys):
                 self._keys[self.keys_written:self._keys.size] = keys[:len(keys) - deficit]
                 self._keys_written = self._keys.size
-                self.expand_shm()  # 请求上游扩容共享内存
+                self._report_merge_request()  # 向上游报告当前数据已准备好合并到全局 bucket keys 数组中
                 keys = keys[len(keys) - deficit:]  # 更新剩余未写入的 keys
                 self.append_keys(keys)
             else:
-                # 如果剩余 keys 一个都写不下，直接写入当前能写的部分并通知上游扩容
-                self.expand_shm()
+                # 如果剩余 keys 一个都写不下，直接通知上游合并当前数据
+                self._report_merge_request()
                 self.append_keys(keys)
         else:
             self._keys[self._keys_written:new_len] = keys
@@ -200,16 +220,16 @@ class ShmBucket(BucketBase):
                 text_field=field_name,
             ):
                 for sample in batch.stack().replace(r'^\s*$', numpy.nan, regex=True).dropna().reset_index(drop=True):
-                    while self.bucket_status != 'ready' and self.bucket_status != 'Exit': sleep(1)
-                    if self.bucket_status == 'Exit': return None  # 如果在等待过程中收到退出命令，直接返回不执行写入
-                    self.insert(text=sample)
+                    while self.paused: sleep(1)
+                    if self.bucket_status == 'Exit': return None  # 收到退出命令
+                    self.insert(text=str(sample))
         elif file_format == 'jsonl':
             for row in iter_jsonl_rows(file_path=file_path):
                 for field in field_name:
-                    while self.bucket_status != 'ready' and self.bucket_status != 'Exit': sleep(1)
-                    if self.bucket_status == 'Exit': return None  # 如果在等待过程中收到退出命令，直接返回不执行写入
+                    while self.paused: sleep(1)
+                    if self.bucket_status == 'Exit': return None  # 收到退出命令
                     content = row.get(field, None)
-                    if isinstance(content, str): self.insert(text=content)
+                    self.insert(text=str(content))
         else: raise ValueError(f"Unsupported file format: {file_format}")
 
         # 向上游报告完成状态

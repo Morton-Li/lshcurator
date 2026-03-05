@@ -20,7 +20,6 @@ class BucketState:
 class BucketShardMemorySpec:
     name: str
     n_elements: int
-    dtype: numpy.dtype = numpy.uint64
 
 
 @dataclass(frozen=True, slots=True)

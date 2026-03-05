@@ -66,14 +66,14 @@ def encode_band_key(
     output_type: Literal['raw', 'digest8']
 ) -> bytes:
     """
-    Band key = band_idx prefix + raw bytes of rows uint64 values.
-    Prefix avoids collisions across bands.
+    Encode the band key for the given band index.
     """
     start = band_idx * rows_per_band
     end = start + rows_per_band
     # 2-byte band prefix is enough for usual band counts
+    if band_idx >= 2**16: raise ValueError(f'band_idx {band_idx} exceeds maximum of 65535 for 2-byte prefix')
     prefix = band_idx.to_bytes(2, "little", signed=False)
-    hash_values_bytes = hash_values[start:end].tobytes()
+    hash_values_bytes = hash_values[start:end].astype('<u8', copy=False).tobytes()
     if output_type == 'raw': return prefix + hash_values_bytes
     elif output_type == 'digest8': return hashlib.blake2b(hash_values_bytes, digest_size=8, person=prefix).digest()
     else: raise ValueError(f'Invalid output_type: {output_type}, expected "raw" or "digest8"')

@@ -34,7 +34,7 @@ class Curator:
         self.config = config
         self._is_running = False
 
-        self.bucket_keys = numpy.empty(0, dtype=self.config.dtype)  # 全局 bucket keys 数组，按需扩展
+        self.bucket_keys = numpy.empty(0, dtype=numpy.uint64)  # 全局 bucket keys 数组，按需扩展
 
         self._report_queue: Queue[ShmBucketReport] = Queue()
         self._workers: dict[int, CuratorWorkerSlot] = {}
@@ -75,7 +75,7 @@ class Curator:
 
         shm = worker_slot.shared_memory
         # 从共享内存中读取 bucket keys 数据
-        bucket_keys_array = numpy.ndarray(shape=(self.config.chunk_elements,), dtype=self.config.dtype, buffer=shm.buf)
+        bucket_keys_array = numpy.ndarray(shape=(self.config.chunk_elements,), dtype=numpy.uint64, buffer=shm.buf)
         # 将 bucket keys 合并到全局数组中
         self.bucket_keys = numpy.concatenate((self.bucket_keys, bucket_keys_array[:n_written]))
 
@@ -90,7 +90,7 @@ class Curator:
         shm = shared_memory.SharedMemory(create=True, size=self.config.shm_chunk_nbytes)
         worker_slot.shared_memory = shm
 
-        shm_spec = BucketShardMemorySpec(name=shm.name, n_elements=self.config.chunk_elements, dtype=self.config.dtype)
+        shm_spec = BucketShardMemorySpec(name=shm.name, n_elements=self.config.chunk_elements)
         worker_slot.command_queue.put(ShmBucketCommand(
             action='refresh_shm',
             kwargs={'new_shm_spec': shm_spec}
@@ -134,13 +134,11 @@ class Curator:
                     bands=self.config.bands,
                     rows_per_band=self.config.rows_per_band,
                     compute_mode=self.config.compute_mode,
-                    dtype=self.config.dtype
                 )
                 new_shm = shared_memory.SharedMemory(create=True, size=self.config.shm_chunk_nbytes)
                 shm_spec = BucketShardMemorySpec(
-                    name=new_shm.name,  # 由 worker 进程在收到命令后创建共享内存并填充名称
+                    name=new_shm.name,
                     n_elements=self.config.chunk_elements,
-                    dtype=self.config.dtype
                 )
                 bucket_command_queue = Queue()
                 queue_group = ShmBucketQueueGroups(

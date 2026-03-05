@@ -59,7 +59,7 @@ class BucketBase(ABC):
             shingle_k=self.cfg.shingle_k,
             shingle_step=self.cfg.shingle_step,
             compute_mode=self.cfg.compute_mode,
-        ).hashvalues.astype(self.cfg.dtype, copy=False)
+        ).hashvalues.astype(numpy.uint64, copy=False)
 
         band_keys: numpy.ndarray = compute_band_keys(
             hash_values=hash_values,
@@ -120,10 +120,7 @@ class ShmBucket(BucketBase):
 
         self._shm_spec = shm_spec
         self._shm = shared_memory.SharedMemory(name=shm_spec.name, create=False)  # 由上游负责创建和管理共享内存
-
-        if self.cfg.dtype != shm_spec.dtype:
-            raise ValueError(f"Bucket dtype {self.cfg.dtype} does not match shared memory dtype {shm_spec.dtype}")
-        self._keys: numpy.ndarray = numpy.ndarray((shm_spec.n_elements,), dtype=shm_spec.dtype, buffer=self._shm.buf)  # 使用共享内存作为 keys 存储
+        self._keys: numpy.ndarray = numpy.ndarray((shm_spec.n_elements,), dtype=numpy.uint64, buffer=self._shm.buf)  # 使用共享内存作为 keys 存储
 
         self.queue_group = queue_group
 
@@ -175,9 +172,7 @@ class ShmBucket(BucketBase):
         self._shm.close()  # 关闭当前共享内存连接
         self._shm_spec = new_shm_spec
         self._shm = shared_memory.SharedMemory(name=new_shm_spec.name, create=False)  # 连接到新的共享内存
-        if self.cfg.dtype != new_shm_spec.dtype:
-            raise ValueError(f"Bucket dtype {self.cfg.dtype} does not match new shared memory dtype {new_shm_spec.dtype}")
-        self._keys = numpy.ndarray((new_shm_spec.n_elements,), dtype=new_shm_spec.dtype, buffer=self._shm.buf)  # 更新 keys 数组指向新的共享内存
+        self._keys = numpy.ndarray((new_shm_spec.n_elements,), dtype=numpy.uint64, buffer=self._shm.buf)  # 更新 keys 数组指向新的共享内存
         self._keys_written = 0  # 重置写入指针
         self.bucket_status = 'ready'
 

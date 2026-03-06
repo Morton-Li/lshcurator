@@ -45,4 +45,4 @@ class CuratorConfig:
     chunk_elements: int = 1_000_000  # 每次分配共享内存的元素数量
 
     @property
-    def shm_chunk_nbytes(self) -> int: return self.chunk_elements * numpy.uint64.itemsize
+    def shm_chunk_nbytes(self) -> int: return self.chunk_elements * numpy.dtype('uint64').itemsize

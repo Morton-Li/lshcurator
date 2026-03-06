@@ -15,6 +15,7 @@ import threading
 from abc import ABC, abstractmethod
 from multiprocessing import shared_memory
 from pathlib import Path
+from queue import Empty
 from time import sleep
 from typing import Literal
 
@@ -135,8 +136,10 @@ class ShmBucket(BucketBase):
         """监听上游命令队列"""
         while self.paused:
             if self.bucket_status == 'Exit': break  # 如果已经是 Exit 状态，直接退出线程
-            command: ShmBucketCommand = self.queue_group.command_queue.get(timeout=1)  # 阻塞等待命令
-            if command is None: continue  # 收到 None 命令，可能是信号或占位，忽略
+            try:
+                command: ShmBucketCommand = self.queue_group.command_queue.get(timeout=1)  # 阻塞等待命令
+            except Empty: continue  # 没有报告，继续等待
+
             if command.action == '<|Exit|>':
                 self.bucket_status = 'Exit'
                 self._shm.close()
@@ -205,7 +208,15 @@ class ShmBucket(BucketBase):
         file_format: Literal['parquet', 'jsonl'] = 'parquet',
         **kwargs
     ) -> None:
-        """批量插入文本并在完成后向上游报告状态"""
+        """
+        批量插入文本并在完成后向上游报告状态
+        Args:
+            file_path: 输入文件路径，支持单个文件路径
+            field_name: 需要处理的文本字段名称，支持单个字段或字段列表
+            file_format: 输入文件格式，支持 'parquet' 和 'jsonl'
+            kwargs:
+                batch_size: 仅对 parquet 有效，指定批处理大小以控制内存使用，默认为 2048
+        """
         if isinstance(field_name, str): field_name = [field_name]
 
         if file_format == 'parquet':

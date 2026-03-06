@@ -1,5 +1,18 @@
+# Copyright 2026 Morton Li. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import hashlib
-from typing import Generator, Any, Literal, Callable
+from typing import Literal, Callable, Iterator
 
 import numpy
 from datasketch import MinHash
@@ -7,7 +20,7 @@ from datasketch import MinHash
 from .utils.types import ComputeMode
 
 
-def iter_char_shingles(text: str, *, k_gram: int, step: int = 1) -> Generator[bytes, Any, None]:
+def iter_char_shingles(text: str, *, k_gram: int, step: int = 1) -> Iterator[bytes]:
     """Character-level k-gram shingles."""
     n = len(text)
     if n < k_gram: return
@@ -15,7 +28,7 @@ def iter_char_shingles(text: str, *, k_gram: int, step: int = 1) -> Generator[by
         yield text[i:i + k_gram].encode("utf-8", errors="ignore")
 
 
-def iter_byte_shingles(text: str, *, k_gram: int, step: int = 1) -> Generator[bytes, Any, None]:
+def iter_byte_shingles(text: str, *, k_gram: int, step: int = 1) -> Iterator[bytes]:
     """Byte-level k-gram shingles."""
     data = text.encode("utf-8", errors="ignore")
     n = len(data)
@@ -24,7 +37,7 @@ def iter_byte_shingles(text: str, *, k_gram: int, step: int = 1) -> Generator[by
         yield data[i:i + k_gram]
 
 
-COMPUTE_FN_MAPPING: dict[ComputeMode, Callable[..., Generator[bytes, Any, None]]] = {
+COMPUTE_FN_MAPPING: dict[ComputeMode, Callable[..., Iterator[bytes]]] = {
     'char': iter_char_shingles,
     'byte': iter_byte_shingles,
 }
@@ -53,14 +66,14 @@ def encode_band_key(
     output_type: Literal['raw', 'digest8']
 ) -> bytes:
     """
-    Band key = band_idx prefix + raw bytes of rows uint64 values.
-    Prefix avoids collisions across bands.
+    Encode the band key for the given band index.
     """
     start = band_idx * rows_per_band
     end = start + rows_per_band
     # 2-byte band prefix is enough for usual band counts
+    if band_idx >= 2**16: raise ValueError(f'band_idx {band_idx} exceeds maximum of 65535 for 2-byte prefix')
     prefix = band_idx.to_bytes(2, "little", signed=False)
-    hash_values_bytes = hash_values[start:end].tobytes()
+    hash_values_bytes = hash_values[start:end].astype('<u8', copy=False).tobytes()
     if output_type == 'raw': return prefix + hash_values_bytes
     elif output_type == 'digest8': return hashlib.blake2b(hash_values_bytes, digest_size=8, person=prefix).digest()
     else: raise ValueError(f'Invalid output_type: {output_type}, expected "raw" or "digest8"')

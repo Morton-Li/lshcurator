@@ -3,7 +3,7 @@ name = "lshcurator"
 dynamic = ["version"]
 description = "High-throughput MinHash + LSH toolkit for large-scale text corpus deduplication and dense near-duplicate mining."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [
   {name = "Morton Li", email = "Morton.L@Outlook.com"}
@@ -12,10 +12,9 @@ keywords = [
   "deduplication", "minhash", "lsh", "near-duplicate", "similarity", "shingling", "text", "corpus", "dataset", "data-curation",
 ]
 classifiers = [
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "License :: OSI Approved :: Apache Software License",
 ]
 dependencies = [

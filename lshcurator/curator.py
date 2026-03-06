@@ -160,8 +160,17 @@ class Curator(CuratorBase):
         corpus_files_path: str | Path | list[str | Path],
         corpus_field_name: str | list[str],
         corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
+        filter_low_freq_bucket_keys: int | None = None,
         **kwargs
     ):
+        """
+        处理语料的主流程接口
+        Args:
+            corpus_files_path: 语料文件路径，支持单个路径或路径列表
+            corpus_field_name: 语料文本字段名称，支持单个字段或字段列表（与文件列表一一对应）
+            corpus_file_format: 语料文件格式，支持 'parquet' 和 'jsonl'
+            filter_low_freq_bucket_keys: 是否过滤低频 bucket keys，传入频率阈值（例如 10）表示过滤掉出现次数低于该阈值的 bucket keys，保留高频 bucket keys 用于后续 deduplication
+        """
         self._is_running = True
         self._report_handler_thread = threading.Thread(target=self._report_handler, daemon=True)
         self._report_handler_thread.start()  # 启动报告处理线程
@@ -180,6 +189,13 @@ class Curator(CuratorBase):
             return None
         bucket_keys = numpy.concatenate(self.bucket_keys)  # 将所有 bucket keys 合并成一个大数组
         print(f"Total bucket keys computed: {len(bucket_keys)}")
+
+        if filter_low_freq_bucket_keys is not None:
+            unique_keys, key_counts = numpy.unique(bucket_keys, return_counts=True)
+            print(f"Total unique bucket keys before filtering: {len(unique_keys)}")
+            filtered_keys = unique_keys[key_counts >= filter_low_freq_bucket_keys]
+            print(f"Bucket keys with frequency >= {filter_low_freq_bucket_keys}: {len(filtered_keys)}")
+            bucket_keys = filtered_keys  # 更新 bucket keys 为过滤后的结果
         # TODO: 完整的处理语料流程设计
 
         self._is_running = False

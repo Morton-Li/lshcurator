@@ -34,6 +34,12 @@ class BucketConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class CandidateSelectorConfig(BucketConfig):
+    @property
+    def num_perm(self) -> int: return self.bands * self.rows_per_band
+
+
+@dataclass(frozen=True, slots=True)
 class DeduperConfig:
     bands: int
     rows_per_band: int

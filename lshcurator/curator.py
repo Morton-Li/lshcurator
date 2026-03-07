@@ -25,7 +25,7 @@ import numpy
 from .bucket import bucket_worker
 from .config import CuratorConfig, BucketConfig
 from .utils.types import (
-    ShmBucketReport, CuratorWorkerSlot, BucketShardMemorySpec, ShmBucketCommand, ShmBucketQueueGroups,
+    ShmBucketReport, CuratorWorkerSlot, ShardMemorySpec, ShmBucketCommand, ShmBucketQueueGroups,
 )
 
 
@@ -92,42 +92,42 @@ class Curator(CuratorBase):
 
             if report.status == 'processing':
                 if report.action == 'merge':
-                    self._merge_bucket_keys(bucket_id=report.bucket_id, n_written=report.written)
-                    target_slot = self.get_worker(report.bucket_id)
+                    self._merge_bucket_keys(worker_id=report.worker_idx, n_written=report.written)
+                    target_slot = self.get_worker(report.worker_idx)
                     if target_slot is None:
-                        print(f'Received merge report for unknown bucket {report.bucket_id}, message: {report.message}')
+                        print(f'Received merge report for unknown worker {report.worker_idx}, message: {report.message}')
                         self._is_running = False
-                        raise RuntimeError(f'Unknown bucket ID in merge report: {report.bucket_id}')
+                        raise RuntimeError(f'Unknown worker ID in merge report: {report.worker_idx}')
                     target_slot.command_queue.put(ShmBucketCommand(
                         action='ready', kwargs={'is_ready': True}
                     ))
                     continue
                 else:
-                    print(f'Received unknown processing action: {report.action} from bucket {report.bucket_id}, message: {report.message}')
+                    print(f'Received unknown processing action: {report.action} from worker {report.worker_idx}, message: {report.message}')
                     self._is_running = False
                     raise RuntimeError(f'Unknown processing action: {report.action}')
             elif report.status == 'complete':
-                self._merge_bucket_keys(bucket_id=report.bucket_id, n_written=report.written)
+                self._merge_bucket_keys(worker_id=report.worker_idx, n_written=report.written)
 
-                target_slot = self.get_worker(report.bucket_id)
+                target_slot = self.get_worker(report.worker_idx)
                 if target_slot is None:
-                    print(f'Received complete report for unknown bucket {report.bucket_id}, message: {report.message}')
+                    print(f'Received complete report for unknown worker {report.worker_idx}, message: {report.message}')
                     self._is_running = False
-                    raise RuntimeError(f'Unknown bucket ID in complete report: {report.bucket_id}')
+                    raise RuntimeError(f'Unknown worker ID in complete report: {report.worker_idx}')
                 target_slot.command_queue.put(ShmBucketCommand(action='<|Exit|>'))  # 命令 worker 进程退出
-                self.pop_worker(report.bucket_id)
+                self.pop_worker(report.worker_idx)
                 continue
             else:
                 # 未知状态
-                print(f'Received unknown report status: {report.status} from bucket {report.bucket_id}, message: {report.message}')
+                print(f'Received unknown report status: {report.status} from worker {report.worker_idx}, message: {report.message}')
                 self._is_running = False
                 raise RuntimeError(f'Unknown report status: {report.status}')
 
-    def _merge_bucket_keys(self, bucket_id: int, n_written: int) -> None:
+    def _merge_bucket_keys(self, worker_id: int, n_written: int) -> None:
         """将指定 bucket 的 keys 合并到全局 bucket keys 数组中，按需扩展全局数组大小。"""
-        worker_slot = self.get_worker(worker_id=bucket_id)
+        worker_slot = self.get_worker(worker_id=worker_id)
         if worker_slot is None:
-            raise RuntimeError(f"Bucket {bucket_id} not found")
+            raise RuntimeError(f"Worker {worker_id} not found")
 
         shm = worker_slot.shared_memory
         # 从共享内存中读取 bucket keys 数据
@@ -136,24 +136,24 @@ class Curator(CuratorBase):
             # 将 bucket keys 合并到全局数组中
             self.bucket_keys.append(bucket_keys_array[:n_written].copy())  # 复制数据以避免共享内存被覆盖
 
-    def _alloc_shared_memory_for_bucket(self, bucket_id: int) -> None:
+    def _alloc_shared_memory_for_bucket(self, worker_id: int) -> None:
         """为指定 bucket 分配新的共享内存，并通过命令队列通知对应的 worker 进程刷新其共享内存映射。"""
-        worker_slot = self.get_worker(worker_id=bucket_id)
+        worker_slot = self.get_worker(worker_id=worker_id)
         if worker_slot is None:
-            raise RuntimeError(f"Bucket {bucket_id} not found")
+            raise RuntimeError(f"Worker {worker_id} not found")
 
         worker_slot.shared_memory.close()
         worker_slot.shared_memory.unlink()
         shm = shared_memory.SharedMemory(create=True, size=self.config.shm_chunk_nbytes)
         worker_slot.shared_memory = shm
 
-        shm_spec = BucketShardMemorySpec(name=shm.name, n_elements=self.config.chunk_elements)
+        shm_spec = ShardMemorySpec(name=shm.name, n_elements=self.config.chunk_elements)
         worker_slot.command_queue.put(ShmBucketCommand(
             action='refresh_shm',
             kwargs={'new_shm_spec': shm_spec}
         ))
 
-        self.set_worker(worker_id=bucket_id, worker_slot=worker_slot)  # 更新 worker 映射中的共享内存信息
+        self.set_worker(worker_id=worker_id, worker_slot=worker_slot)  # 更新 worker 映射中的共享内存信息
 
     def process_corpus(
         self,
@@ -239,7 +239,7 @@ class Curator(CuratorBase):
                 compute_mode=self.config.compute_mode,
             )
             new_shm = shared_memory.SharedMemory(create=True, size=self.config.shm_chunk_nbytes)
-            shm_spec = BucketShardMemorySpec(
+            shm_spec = ShardMemorySpec(
                 name=new_shm.name,
                 n_elements=self.config.chunk_elements,
             )
@@ -263,7 +263,7 @@ class Curator(CuratorBase):
                     'shm_spec': shm_spec,
                     'queue_group': queue_group,
                     'job_kwargs': job_kwargs,
-                    'bucket_id': worker_idx
+                    'worker_idx': worker_idx
                 },
                 name=f'BucketWorker-{worker_idx}'
             )
@@ -272,7 +272,7 @@ class Curator(CuratorBase):
             self.set_worker(
                 worker_id=worker_idx,
                 worker_slot=CuratorWorkerSlot(
-                    bucket_id=worker_idx,
+                    worker_id=worker_idx,
                     process=process,  # 由 executor 启动后返回的 Future 对象管理
                     command_queue=bucket_command_queue,
                     shared_memory=new_shm

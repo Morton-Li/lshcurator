@@ -24,7 +24,7 @@ import numpy
 from .algorithms import compute_minhash_signature, compute_band_keys
 from .config import BucketConfig
 from .utils.readers import iter_parquet_batches, iter_jsonl_rows
-from .utils.types import BucketShardMemorySpec, ShmBucketReport, ShmBucketQueueGroups, ShmBucketCommand, ComputeModeSet
+from .utils.types import ShardMemorySpec, ShmBucketReport, ShmBucketQueueGroups, ShmBucketCommand, ComputeModeSet
 
 
 class BucketBase(ABC):
@@ -111,13 +111,13 @@ class ShmBucket(BucketBase):
     def __init__(
         self,
         config: BucketConfig,
-        shm_spec: BucketShardMemorySpec,
+        shm_spec: ShardMemorySpec,
         queue_group: ShmBucketQueueGroups,
-        bucket_id: int = 0,
+        worker_idx: int = 0,
     ):
         super().__init__(config=config)
-        self.bucket_id = bucket_id
-        self.bucket_status = 'ready'
+        self.worker_idx = worker_idx
+        self.worker_status = 'ready'
 
         self._shm_spec = shm_spec
         self._shm = shared_memory.SharedMemory(name=shm_spec.name, create=False)  # 由上游负责创建和管理共享内存
@@ -130,18 +130,18 @@ class ShmBucket(BucketBase):
         self._command_listener_thread.start()
 
     @property
-    def paused(self) -> bool: return self.bucket_status not in ['ready', 'Exit']
+    def paused(self) -> bool: return self.worker_status not in ['ready', 'Exit']
 
     def _listen_for_commands(self) -> None:
         """监听上游命令队列"""
         while self.paused:
-            if self.bucket_status == 'Exit': break  # 如果已经是 Exit 状态，直接退出线程
+            if self.worker_status == 'Exit': break  # 如果已经是 Exit 状态，直接退出线程
             try:
                 command: ShmBucketCommand = self.queue_group.command_queue.get(timeout=1)  # 阻塞等待命令
             except Empty: continue  # 没有报告，继续等待
 
             if command.action == '<|Exit|>':
-                self.bucket_status = 'Exit'
+                self.worker_status = 'Exit'
                 self._shm.close()
                 break  # 退出线程
             else:
@@ -151,37 +151,37 @@ class ShmBucket(BucketBase):
                     kwargs = command.kwargs or {}
                     fn(**kwargs)  # 调用对应方法处理命令
                 else:
-                    print(f"Bucket {self.bucket_id} received unknown command: {command.action}")
+                    print(f"Bucket Worker {self.worker_idx} received unknown command: {command.action}")
 
-    def ready(self, is_ready: bool = True) -> None: self.bucket_status = 'ready' if is_ready else 'not_ready'  # 直接设置状态，供外部调用以控制 bucket 是否接受写入
+    def ready(self, is_ready: bool = True) -> None: self.worker_status = 'ready' if is_ready else 'not_ready'  # 直接设置状态，供外部调用以控制 bucket 是否接受写入
 
     def _report_merge_request(self) -> None:
         """向上游报告当前 bucket 的数据已准备好合并到全局 bucket keys 数组中"""
-        self.bucket_status = 'reporting_merge'
+        self.worker_status = 'reporting_merge'
         self.queue_group.report_queue.put(ShmBucketReport(
-            bucket_id=self.bucket_id,
+            worker_idx=self.worker_idx,
             ShmSpec=self._shm_spec,
             written=self.keys_written,
             status='processing',
             action='merge',
-            message=f"Bucket {self.bucket_id} reporting ready for merge with {self.keys_written} keys",
+            message=f"Bucket Worker {self.worker_idx} reporting ready for merge with {self.keys_written} keys",
         ))
         while self.paused: sleep(1)  # 阻塞等待上游处理完成后状态变为 ready 或接到 Exit
         self.clear()
 
-    def refresh_shm(self, new_shm_spec: BucketShardMemorySpec) -> None:
+    def refresh_shm(self, new_shm_spec: ShardMemorySpec) -> None:
         """刷新共享内存连接以适应新的共享内存区域，通常在上游扩容后调用"""
-        self.bucket_status = 'refreshing_shm'
+        self.worker_status = 'refreshing_shm'
         self._shm.close()  # 关闭当前共享内存连接
         self._shm_spec = new_shm_spec
         self._shm = shared_memory.SharedMemory(name=new_shm_spec.name, create=False)  # 连接到新的共享内存
         self._keys = numpy.ndarray((new_shm_spec.n_elements,), dtype=numpy.uint64, buffer=self._shm.buf)  # 更新 keys 数组指向新的共享内存
         self._keys_written = 0  # 重置写入指针
-        self.bucket_status = 'ready'
+        self.worker_status = 'ready'
 
     def append_keys(self, keys: numpy.ndarray) -> None:
         while self.paused: sleep(1)  # 等待状态变为 ready
-        if self.bucket_status == 'Exit': return  # 收到退出命令
+        if self.worker_status == 'Exit': return  # 收到退出命令
         if not isinstance(keys, numpy.ndarray): raise ValueError("Keys must be a numpy array")
         new_len = self.keys_written + len(keys)
         if new_len > self._keys.size:
@@ -227,24 +227,24 @@ class ShmBucket(BucketBase):
             ):
                 for sample in batch.stack().replace(r'^\s*$', numpy.nan, regex=True).dropna().reset_index(drop=True):
                     while self.paused: sleep(1)
-                    if self.bucket_status == 'Exit': return None  # 收到退出命令
+                    if self.worker_status == 'Exit': return None  # 收到退出命令
                     self.insert(text=str(sample))
         elif file_format == 'jsonl':
             for row in iter_jsonl_rows(file_path=file_path):
                 for field in field_name:
                     while self.paused: sleep(1)
-                    if self.bucket_status == 'Exit': return None  # 收到退出命令
+                    if self.worker_status == 'Exit': return None  # 收到退出命令
                     content = row.get(field, None)
                     self.insert(text=str(content))
         else: raise ValueError(f"Unsupported file format: {file_format}")
 
         # 向上游报告完成状态
         self.queue_group.report_queue.put(ShmBucketReport(
-            bucket_id=self.bucket_id,
+            worker_idx=self.worker_idx,
             ShmSpec=self._shm_spec,
             written=self.keys_written,
             status='complete',
-            message=f"Bucket {self.bucket_id} completed job with {self.keys_written} keys",
+            message=f"Bucket Worker {self.worker_idx} completed job with {self.keys_written} keys",
         ))
         # 防止在报告完成后继续接受命令导致数据混用
         self.clear()
@@ -255,13 +255,13 @@ class ShmBucket(BucketBase):
 
 def bucket_worker(
     config: BucketConfig,
-    shm_spec: BucketShardMemorySpec,
+    shm_spec: ShardMemorySpec,
     queue_group: ShmBucketQueueGroups,
     job_kwargs: dict,
-    bucket_id: int = 0,
+    worker_idx: int = 0,
 ) -> None:
     """Bucket 进程的主函数，负责创建 ShmBucket 实例并运行任务"""
-    bucket = ShmBucket(config=config, shm_spec=shm_spec, queue_group=queue_group, bucket_id=bucket_id)
+    bucket = ShmBucket(config=config, shm_spec=shm_spec, queue_group=queue_group, worker_idx=worker_idx)
     bucket.run_job(**job_kwargs)
 
 

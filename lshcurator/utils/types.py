@@ -17,7 +17,7 @@ class BucketState:
 
 
 @dataclass(frozen=True, slots=True)
-class BucketShardMemorySpec:
+class ShardMemorySpec:
     name: str
     n_elements: int
 
@@ -30,8 +30,8 @@ class ShmBucketCommand:
 
 @dataclass(frozen=True, slots=True)
 class ShmBucketReport:
-    bucket_id: int
-    ShmSpec: BucketShardMemorySpec
+    worker_idx: int
+    ShmSpec: ShardMemorySpec
     written: int
     status: Literal['complete', 'error', 'processing']
     action: Literal['merge', 'clear'] | None = None  # 请求主进程的动作(扩容、清理等)，仅在 status='processing' 时有效
@@ -46,7 +46,7 @@ class ShmBucketQueueGroups:
 
 @dataclass(slots=True)
 class CuratorWorkerSlot:
-    bucket_id: int
+    worker_id: int
     process: Process
     command_queue: Queue[ShmBucketCommand]
     shared_memory: shared_memory.SharedMemory

@@ -39,7 +39,7 @@ class BucketBase(ABC):
         self._keys_written: int = 0  # 记录 keys 已写入长度指针
 
     @abstractmethod
-    def append_keys(self, keys: numpy.ndarray) -> None: ...
+    def append_keys(self, keys: numpy.ndarray[numpy.uint64]) -> None: ...
     @abstractmethod
     def clear(self) -> None: ...
     @property
@@ -54,7 +54,7 @@ class BucketBase(ABC):
 
     def insert(self, text: str) -> None:
         """Insert a text into the LSH buckets based on its MinHash signature."""
-        hash_values: numpy.ndarray = compute_minhash_signature(
+        hash_values: numpy.ndarray[numpy.uint64] = compute_minhash_signature(
             text=text,
             num_perm=self.cfg.bands * self.cfg.rows_per_band,
             shingle_k=self.cfg.shingle_k,
@@ -62,7 +62,7 @@ class BucketBase(ABC):
             compute_mode=self.cfg.compute_mode,
         ).hashvalues.astype(numpy.uint64, copy=False)
 
-        band_keys: numpy.ndarray = compute_band_keys(
+        band_keys: numpy.ndarray[numpy.uint64] = compute_band_keys(
             hash_values=hash_values,
             bands=self.cfg.bands,
             rows_per_band=self.cfg.rows_per_band,
@@ -75,7 +75,7 @@ class Bucket(BucketBase):
         super().__init__(config=config)
         self._keys: numpy.ndarray = numpy.empty(1_000_000, dtype=numpy.uint64)  # 使用 np 替代 list 降低开销
 
-    def append_keys(self, keys: numpy.ndarray) -> None:
+    def append_keys(self, keys: numpy.ndarray[numpy.uint64]) -> None:
         """Append keys to the internal storage, resizing if necessary."""
         if not isinstance(keys, numpy.ndarray): raise ValueError("Keys must be a numpy array")
         new_len = self._keys_written + len(keys)
@@ -179,7 +179,7 @@ class ShmBucket(BucketBase):
         self._keys_written = 0  # 重置写入指针
         self.worker_status = 'ready'
 
-    def append_keys(self, keys: numpy.ndarray) -> None:
+    def append_keys(self, keys: numpy.ndarray[numpy.uint64]) -> None:
         while self.paused: sleep(1)  # 等待状态变为 ready
         if self.worker_status == 'Exit': return  # 收到退出命令
         if not isinstance(keys, numpy.ndarray): raise ValueError("Keys must be a numpy array")
@@ -234,7 +234,8 @@ class ShmBucket(BucketBase):
                 for field in field_name:
                     while self.paused: sleep(1)
                     if self.worker_status == 'Exit': return None  # 收到退出命令
-                    content = row.get(field, None)
+                    content = row.get(field, '').strip()
+                    if not content: continue
                     self.insert(text=str(content))
         else: raise ValueError(f"Unsupported file format: {file_format}")
 

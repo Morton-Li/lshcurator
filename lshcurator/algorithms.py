@@ -80,11 +80,11 @@ def encode_band_key(
 
 
 def compute_band_keys(
-    hash_values: numpy.ndarray,
+    hash_values: numpy.ndarray[numpy.uint64],
     *,
     bands: int,
     rows_per_band: int,
-) -> numpy.ndarray:
+) -> numpy.ndarray[numpy.uint64]:
     """
     Compute band keys for the given hash values.
     Args:

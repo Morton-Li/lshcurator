@@ -53,12 +53,12 @@ class CuratorConfig:
     shingle_step: int
     bands: int
     rows_per_band: int
-    similarity_threshold: float
     compute_mode: ComputeMode = 'char'
 
-    max_workers: int = 8
+    max_workers: int = 1
     chunk_elements: int = 1_000_000  # 每次分配共享内存的元素数量
 
+    similarity_threshold: float | None = None
     max_representatives_per_bucket: int | None = None
 
     @property

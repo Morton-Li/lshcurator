@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from multiprocessing import Process, shared_memory
 from multiprocessing.queues import Queue
 from typing import TypeAlias, Literal
@@ -11,9 +11,10 @@ ComputeMode: TypeAlias = Literal['char', 'byte']
 
 
 @dataclass(slots=True)
-class BucketState:
-    representatives: list[numpy.ndarray]  # representative hash_values arrays (uint64, length=num_perm)
-    hit_count: int = 0  # number of times this bucket has been hit
+class HashRepresentatives:
+    representatives: list[numpy.ndarray] = field(default_factory=list)  # representative hash_values arrays (uint64, length=num_perm)
+    def add_representative(self, hash_values: numpy.ndarray) -> None:
+        self.representatives.append(hash_values)
 
 
 @dataclass(frozen=True, slots=True)

@@ -172,10 +172,13 @@ class Curator(CuratorBase):
             corpus_field_name: 语料文本字段名称，支持单个字段或字段列表
             corpus_file_format: 语料文件格式，支持 'parquet' 和 'jsonl'
             filter_low_freq_bucket_keys: 是否过滤低频 bucket keys，传入频率阈值（例如 10）表示过滤掉出现次数低于该阈值的 bucket keys，保留高频 bucket keys 用于后续 deduplication
+            kwargs:
+                batch_size: 处理语料时每个批次的文本数量，仅在 corpus_file_format='parquet' 时有效，默认为 2048
+        Returns:
+            生成器逐条返回文本和去重结果的元组 (text, not_duplicated)，其中 not_duplicated 为 True 表示该文本被认为是唯一的，False 表示该文本被认为是重复的
         """
-        self._is_running = True
-        self._report_handler_thread = threading.Thread(target=self._report_handler, daemon=True)
-        self._report_handler_thread.start()  # 启动报告处理线程
+        if self.config.similarity_threshold is None:
+            raise ValueError("similarity_threshold must be set in config for deduplication")
 
         _corpus_files_path = corpus_files_path
         if isinstance(_corpus_files_path, str): _corpus_files_path = [Path(_corpus_files_path)]
@@ -185,30 +188,29 @@ class Curator(CuratorBase):
                 if isinstance(path, str): _corpus_files_path[idx] = Path(path)
         else: raise ValueError(f"Invalid corpus_files_path type: {type(corpus_files_path)}")
 
-        # 1. 计算 bucket keys
+        # 1. Compute bucket keys
         self._compute_bucket_keys(
             corpus_files_path=_corpus_files_path,
             corpus_field_name=corpus_field_name,
             corpus_file_format=corpus_file_format,
             **kwargs
         )
+
         if len(self.bucket_keys) == 0:
             print("No bucket keys were computed.")
-            self._is_running = False
-            self._report_handler_thread.join()  # 等待报告处理线程退出，设置超时以防止死锁
             return # 没有 bucket keys，直接返回空迭代器
         bucket_keys = numpy.concatenate(self.bucket_keys)  # 将所有 bucket keys 合并成一个大数组
         print(f"Total bucket keys computed: {len(bucket_keys)}")
+        self.bucket_keys.clear()  # 清空全局 bucket keys 列表，释放内存
 
         if filter_low_freq_bucket_keys is not None:
-            unique_keys, key_counts = numpy.unique(bucket_keys, return_counts=True)
-            print(f"Total unique bucket keys before filtering: {len(unique_keys)}")
+            unique_keys, key_counts = numpy.unique(bucket_keys, return_counts=True)  # unique 会返回有序结果无需 sort
             filtered_keys = unique_keys[key_counts >= filter_low_freq_bucket_keys]
-            print(f"Bucket keys with frequency >= {filter_low_freq_bucket_keys}: {len(filtered_keys)}")
             bucket_keys = filtered_keys  # 更新 bucket keys 为过滤后的结果
-
-        self._is_running = False
-        self._report_handler_thread.join()  # 等待报告处理线程退出，设置超时以防止死锁
+            if len(bucket_keys) == 0:
+                print(f"No bucket keys meet the frequency threshold of {filter_low_freq_bucket_keys}. Consider lowering the threshold.")
+                return # 没有 bucket keys，直接返回空迭代器
+        else: bucket_keys.sort()  # 直接排序全局 bucket keys 数组，确保其有序且升序，满足后续 deduplication 中 searchsorted 的正确性要求
 
         # 2. 基于计算得到的 bucket keys 进行 deduplication，统计去重结果
         deduper = Deduper(
@@ -230,9 +232,9 @@ class Curator(CuratorBase):
             corpus_file_format=corpus_file_format,
             **kwargs
         ):
-            # 是否保留/是否唯一
-            is_duplicate: bool = not deduper(text)
-            yield text, is_duplicate  # 生成器逐条返回文本和去重结果
+            # 是否唯一
+            not_duplicated: bool = deduper(text)
+            yield text, not_duplicated  # 生成器逐条返回文本和去重结果
 
     def _compute_bucket_keys(
         self,
@@ -242,6 +244,10 @@ class Curator(CuratorBase):
         **kwargs
     ) -> None:
         """计算 bucket keys"""
+        self._is_running = True
+        self._report_handler_thread = threading.Thread(target=self._report_handler, daemon=True)
+        self._report_handler_thread.start()  # 启动报告处理线程
+
         self.bucket_keys.clear()  # 清空全局 bucket keys 数组
 
         # 创建多进程
@@ -306,6 +312,9 @@ class Curator(CuratorBase):
 
         # 确保所有进程均运行完毕后再返回
         while self.worker_count > 0: sleep(1)
+
+        self._is_running = False
+        self._report_handler_thread.join()  # 等待报告处理线程退出，设置超时以防止死锁
         return None
 
     def compute_bucket_keys(
@@ -326,18 +335,11 @@ class Curator(CuratorBase):
                 if isinstance(path, str): _corpus_files_path[idx] = Path(path)
         else: raise ValueError(f"Invalid corpus_files_path type: {type(corpus_files_path)}")
 
-        self._is_running = True
-        self._report_handler_thread = threading.Thread(target=self._report_handler, daemon=True)
-        self._report_handler_thread.start()  # 启动报告处理线程
-
         self._compute_bucket_keys(
             corpus_files_path=_corpus_files_path,
             corpus_field_name=corpus_field_name,
             corpus_file_format=corpus_file_format,
             **kwargs
         )
-
-        self._is_running = False
-        self._report_handler_thread.join()  # 等待报告处理线程退出，设置超时以防止死锁
 
         return numpy.concatenate(self.bucket_keys) if len(self.bucket_keys) > 0 else numpy.array([], dtype=numpy.uint64)

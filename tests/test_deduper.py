@@ -7,47 +7,54 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from lshcurator import Deduper
-from lshcurator.utils import compute_minhash_signature, encode_band_key
+from lshcurator import Deduper, DeduperConfig
+from lshcurator.algorithms import compute_minhash_signature, encode_band_key
 
 
 def test_similarity_threshold_validation():
     with pytest.raises(ValueError):
-        Deduper(
-            bucket_keys=numpy.array([1], dtype=numpy.uint64),
-            bands=4, rows_per_band=4,
-            shingle_k=5, shingle_step=1,
+        deduper_config = DeduperConfig(
+            bands=4, rows_per_band=4, shingle_k=5, shingle_step=1, compute_mode="char",
             similarity_threshold=-0.01,
         )
-    with pytest.raises(ValueError):
         Deduper(
             bucket_keys=numpy.array([1], dtype=numpy.uint64),
-            bands=4, rows_per_band=4,
-            shingle_k=5, shingle_step=1,
+            config=deduper_config,
+        )
+    with pytest.raises(ValueError):
+        deduper_config = DeduperConfig(
+            bands=4, rows_per_band=4, shingle_k=5, shingle_step=1, compute_mode="char",
             similarity_threshold=1.01,
+        )
+        Deduper(
+            bucket_keys=numpy.array([1], dtype=numpy.uint64),
+            config=deduper_config,
         )
 
 
 def test_bucket_keys_sorted_in_place():
+    deduper_config = DeduperConfig(
+        bands=2, rows_per_band=4, shingle_k=5, shingle_step=1, compute_mode="char",
+        similarity_threshold=0.9,
+    )
     arr = numpy.array([9, 2, 7, 2], dtype=numpy.uint64)  # 未排序
     _ = Deduper(
         bucket_keys=arr,
-        bands=2, rows_per_band=4,
-        shingle_k=5, shingle_step=1,
-        similarity_threshold=0.9,
+        config=deduper_config
     )
     # Deduper.__init__ 会对传入数组原地 sort()
     assert numpy.all(arr[:-1] <= arr[1:])
 
 
 def test_when_key_not_in_bucket_keys_should_keep_and_not_build_buckets():
+    deduper_config = DeduperConfig(
+        bands=8, rows_per_band=4, shingle_k=5, shingle_step=1, compute_mode="char",
+        similarity_threshold=0.9,
+    )
     # bucket_keys 为空 => 所有 key 都会被跳过 => 永远 keep，且 _buckets 为空
     d = Deduper(
         bucket_keys=numpy.empty((0,), dtype=numpy.uint64),
-        bands=8, rows_per_band=4,
-        shingle_k=5, shingle_step=1,
-        similarity_threshold=0.9,
-        compute_mode="char",
+        config=deduper_config
     )
     assert d("same text") is True
     assert d("same text") is True
@@ -76,12 +83,13 @@ def test_drop_identical_text_when_keys_present():
 
     bucket_keys = numpy.array(keys, dtype=numpy.uint64)
 
+    deduper_config = DeduperConfig(
+        bands=bands, rows_per_band=rows, shingle_k=5, shingle_step=1, compute_mode="char",
+        similarity_threshold=0.95,  # identical => 1.0 >= 0.95 => drop
+    )
     d = Deduper(
         bucket_keys=bucket_keys,
-        bands=bands, rows_per_band=rows,
-        shingle_k=5, shingle_step=1,
-        similarity_threshold=0.95,  # identical => 1.0 >= 0.95 => drop
-        compute_mode="char",
+        config=deduper_config
     )
 
     assert d("hello") is True
@@ -116,13 +124,14 @@ def test_max_representatives_per_bucket_caps_growth(monkeypatch):
         dtype=numpy.uint64,
     )
 
+    deduper_config = DeduperConfig(
+        bands=bands, rows_per_band=rows, shingle_k=5, shingle_step=1, compute_mode="byte",
+        similarity_threshold=0.99,  # 不同文本几乎不相等 => 都会 keep
+        max_representatives_per_bucket=2,
+    )
     d = Deduper(
         bucket_keys=fixed_keys,
-        bands=bands, rows_per_band=rows,
-        shingle_k=5, shingle_step=1,
-        similarity_threshold=0.99,   # 不同文本几乎不相等 => 都会 keep
-        compute_mode="byte",
-        max_representatives_per_bucket=2,
+        config=deduper_config
     )
 
     texts = [f"text-{i}" for i in range(6)]
@@ -150,12 +159,13 @@ def test_compute_mode_is_forwarded_to_minhash(monkeypatch):
     from lshcurator import deduper
     monkeypatch.setattr(deduper, "compute_minhash_signature", _spy_minhash)
 
+    deduper_config = DeduperConfig(
+        bands=1, rows_per_band=4, shingle_k=5, shingle_step=1,
+        similarity_threshold=0.9, compute_mode="byte",
+    )
     d = Deduper(
         bucket_keys=numpy.array([numpy.uint64(0xABCD0000_00000000)], dtype=numpy.uint64),
-        bands=1, rows_per_band=4,
-        shingle_k=5, shingle_step=1,
-        similarity_threshold=0.9,
-        compute_mode="byte",
+        config=deduper_config
     )
     d("x")
     assert seen["mode"] == "byte"

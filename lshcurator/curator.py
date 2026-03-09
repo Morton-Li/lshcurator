@@ -18,14 +18,16 @@ from multiprocessing.connection import wait
 from pathlib import Path
 from queue import Empty
 from time import sleep
-from typing import Literal
+from typing import Literal, Iterator
 
 import numpy
 
 from .bucket import bucket_worker
-from .config import CuratorConfig, BucketConfig
+from .config import CuratorConfig, BucketConfig, DeduperConfig
+from .deduper import Deduper
+from .utils.readers import iter_corpus_texts
 from .utils.types import (
-    ShmBucketReport, CuratorWorkerSlot, BucketShardMemorySpec, ShmBucketCommand, ShmBucketQueueGroups,
+    ShmBucketReport, CuratorWorkerSlot, ShardMemorySpec, ShmBucketCommand, ShmBucketQueueGroups,
 )
 
 
@@ -92,42 +94,42 @@ class Curator(CuratorBase):
 
             if report.status == 'processing':
                 if report.action == 'merge':
-                    self._merge_bucket_keys(bucket_id=report.bucket_id, n_written=report.written)
-                    target_slot = self.get_worker(report.bucket_id)
+                    self._merge_bucket_keys(worker_id=report.worker_idx, n_written=report.written)
+                    target_slot = self.get_worker(report.worker_idx)
                     if target_slot is None:
-                        print(f'Received merge report for unknown bucket {report.bucket_id}, message: {report.message}')
+                        print(f'Received merge report for unknown worker {report.worker_idx}, message: {report.message}')
                         self._is_running = False
-                        raise RuntimeError(f'Unknown bucket ID in merge report: {report.bucket_id}')
+                        raise RuntimeError(f'Unknown worker ID in merge report: {report.worker_idx}')
                     target_slot.command_queue.put(ShmBucketCommand(
                         action='ready', kwargs={'is_ready': True}
                     ))
                     continue
                 else:
-                    print(f'Received unknown processing action: {report.action} from bucket {report.bucket_id}, message: {report.message}')
+                    print(f'Received unknown processing action: {report.action} from worker {report.worker_idx}, message: {report.message}')
                     self._is_running = False
                     raise RuntimeError(f'Unknown processing action: {report.action}')
             elif report.status == 'complete':
-                self._merge_bucket_keys(bucket_id=report.bucket_id, n_written=report.written)
+                self._merge_bucket_keys(worker_id=report.worker_idx, n_written=report.written)
 
-                target_slot = self.get_worker(report.bucket_id)
+                target_slot = self.get_worker(report.worker_idx)
                 if target_slot is None:
-                    print(f'Received complete report for unknown bucket {report.bucket_id}, message: {report.message}')
+                    print(f'Received complete report for unknown worker {report.worker_idx}, message: {report.message}')
                     self._is_running = False
-                    raise RuntimeError(f'Unknown bucket ID in complete report: {report.bucket_id}')
+                    raise RuntimeError(f'Unknown worker ID in complete report: {report.worker_idx}')
                 target_slot.command_queue.put(ShmBucketCommand(action='<|Exit|>'))  # 命令 worker 进程退出
-                self.pop_worker(report.bucket_id)
+                self.pop_worker(report.worker_idx)
                 continue
             else:
                 # 未知状态
-                print(f'Received unknown report status: {report.status} from bucket {report.bucket_id}, message: {report.message}')
+                print(f'Received unknown report status: {report.status} from worker {report.worker_idx}, message: {report.message}')
                 self._is_running = False
                 raise RuntimeError(f'Unknown report status: {report.status}')
 
-    def _merge_bucket_keys(self, bucket_id: int, n_written: int) -> None:
+    def _merge_bucket_keys(self, worker_id: int, n_written: int) -> None:
         """将指定 bucket 的 keys 合并到全局 bucket keys 数组中，按需扩展全局数组大小。"""
-        worker_slot = self.get_worker(worker_id=bucket_id)
+        worker_slot = self.get_worker(worker_id=worker_id)
         if worker_slot is None:
-            raise RuntimeError(f"Bucket {bucket_id} not found")
+            raise RuntimeError(f"Worker {worker_id} not found")
 
         shm = worker_slot.shared_memory
         # 从共享内存中读取 bucket keys 数据
@@ -136,39 +138,56 @@ class Curator(CuratorBase):
             # 将 bucket keys 合并到全局数组中
             self.bucket_keys.append(bucket_keys_array[:n_written].copy())  # 复制数据以避免共享内存被覆盖
 
-    def _alloc_shared_memory_for_bucket(self, bucket_id: int) -> None:
+    def _alloc_shared_memory_for_bucket(self, worker_id: int) -> None:
         """为指定 bucket 分配新的共享内存，并通过命令队列通知对应的 worker 进程刷新其共享内存映射。"""
-        worker_slot = self.get_worker(worker_id=bucket_id)
+        worker_slot = self.get_worker(worker_id=worker_id)
         if worker_slot is None:
-            raise RuntimeError(f"Bucket {bucket_id} not found")
+            raise RuntimeError(f"Worker {worker_id} not found")
 
         worker_slot.shared_memory.close()
         worker_slot.shared_memory.unlink()
         shm = shared_memory.SharedMemory(create=True, size=self.config.shm_chunk_nbytes)
         worker_slot.shared_memory = shm
 
-        shm_spec = BucketShardMemorySpec(name=shm.name, n_elements=self.config.chunk_elements)
+        shm_spec = ShardMemorySpec(name=shm.name, n_elements=self.config.chunk_elements)
         worker_slot.command_queue.put(ShmBucketCommand(
             action='refresh_shm',
             kwargs={'new_shm_spec': shm_spec}
         ))
 
-        self.set_worker(worker_id=bucket_id, worker_slot=worker_slot)  # 更新 worker 映射中的共享内存信息
+        self.set_worker(worker_id=worker_id, worker_slot=worker_slot)  # 更新 worker 映射中的共享内存信息
 
     def process_corpus(
         self,
         corpus_files_path: str | Path | list[str | Path],
         corpus_field_name: str | list[str],
         corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
+        filter_low_freq_bucket_keys: int | None = None,
         **kwargs
-    ):
+    ) -> Iterator[tuple[str, bool]]:
+        """
+        处理语料的主流程接口
+        Args:
+            corpus_files_path: 语料文件路径，支持单个路径或路径列表
+            corpus_field_name: 语料文本字段名称，支持单个字段或字段列表
+            corpus_file_format: 语料文件格式，支持 'parquet' 和 'jsonl'
+            filter_low_freq_bucket_keys: 是否过滤低频 bucket keys，传入频率阈值（例如 10）表示过滤掉出现次数低于该阈值的 bucket keys，保留高频 bucket keys 用于后续 deduplication
+        """
         self._is_running = True
         self._report_handler_thread = threading.Thread(target=self._report_handler, daemon=True)
         self._report_handler_thread.start()  # 启动报告处理线程
 
+        _corpus_files_path = corpus_files_path
+        if isinstance(_corpus_files_path, str): _corpus_files_path = [Path(_corpus_files_path)]
+        elif isinstance(_corpus_files_path, Path): _corpus_files_path = [_corpus_files_path]
+        elif isinstance(_corpus_files_path, list):
+            for idx, path in enumerate(_corpus_files_path):
+                if isinstance(path, str): _corpus_files_path[idx] = Path(path)
+        else: raise ValueError(f"Invalid corpus_files_path type: {type(corpus_files_path)}")
+
         # 1. 计算 bucket keys
         self._compute_bucket_keys(
-            corpus_files_path=corpus_files_path,
+            corpus_files_path=_corpus_files_path,
             corpus_field_name=corpus_field_name,
             corpus_file_format=corpus_file_format,
             **kwargs
@@ -177,13 +196,43 @@ class Curator(CuratorBase):
             print("No bucket keys were computed.")
             self._is_running = False
             self._report_handler_thread.join()  # 等待报告处理线程退出，设置超时以防止死锁
-            return None
+            return # 没有 bucket keys，直接返回空迭代器
         bucket_keys = numpy.concatenate(self.bucket_keys)  # 将所有 bucket keys 合并成一个大数组
         print(f"Total bucket keys computed: {len(bucket_keys)}")
-        # TODO: 完整的处理语料流程设计
+
+        if filter_low_freq_bucket_keys is not None:
+            unique_keys, key_counts = numpy.unique(bucket_keys, return_counts=True)
+            print(f"Total unique bucket keys before filtering: {len(unique_keys)}")
+            filtered_keys = unique_keys[key_counts >= filter_low_freq_bucket_keys]
+            print(f"Bucket keys with frequency >= {filter_low_freq_bucket_keys}: {len(filtered_keys)}")
+            bucket_keys = filtered_keys  # 更新 bucket keys 为过滤后的结果
 
         self._is_running = False
         self._report_handler_thread.join()  # 等待报告处理线程退出，设置超时以防止死锁
+
+        # 2. 基于计算得到的 bucket keys 进行 deduplication，统计去重结果
+        deduper = Deduper(
+            bucket_keys=bucket_keys,
+            config=DeduperConfig(
+                bands=self.config.bands,
+                rows_per_band=self.config.rows_per_band,
+                shingle_k=self.config.shingle_k,
+                shingle_step=self.config.shingle_step,
+                similarity_threshold=self.config.similarity_threshold,
+                compute_mode=self.config.compute_mode,
+                max_representatives_per_bucket=self.config.max_representatives_per_bucket,
+            )
+        )
+
+        for text in iter_corpus_texts(
+            corpus_files_path=_corpus_files_path,
+            corpus_field_name=corpus_field_name,
+            corpus_file_format=corpus_file_format,
+            **kwargs
+        ):
+            # 是否保留/是否唯一
+            is_duplicate: bool = not deduper(text)
+            yield text, is_duplicate  # 生成器逐条返回文本和去重结果
 
     def _compute_bucket_keys(
         self,
@@ -193,14 +242,6 @@ class Curator(CuratorBase):
         **kwargs
     ) -> None:
         """计算 bucket keys"""
-        _corpus_files_path = corpus_files_path
-        if isinstance(_corpus_files_path, str): _corpus_files_path = [Path(_corpus_files_path)]
-        elif isinstance(_corpus_files_path, Path): _corpus_files_path = [_corpus_files_path]
-        elif isinstance(_corpus_files_path, list):
-            for idx, path in enumerate(_corpus_files_path):
-                if isinstance(path, str): _corpus_files_path[idx] = Path(path)
-        else: raise ValueError(f"Invalid corpus_files_path type: {type(corpus_files_path)}")
-
         self.bucket_keys.clear()  # 清空全局 bucket keys 数组
 
         # 创建多进程
@@ -223,7 +264,7 @@ class Curator(CuratorBase):
                 compute_mode=self.config.compute_mode,
             )
             new_shm = shared_memory.SharedMemory(create=True, size=self.config.shm_chunk_nbytes)
-            shm_spec = BucketShardMemorySpec(
+            shm_spec = ShardMemorySpec(
                 name=new_shm.name,
                 n_elements=self.config.chunk_elements,
             )
@@ -247,7 +288,7 @@ class Curator(CuratorBase):
                     'shm_spec': shm_spec,
                     'queue_group': queue_group,
                     'job_kwargs': job_kwargs,
-                    'bucket_id': worker_idx
+                    'worker_idx': worker_idx
                 },
                 name=f'BucketWorker-{worker_idx}'
             )
@@ -256,7 +297,7 @@ class Curator(CuratorBase):
             self.set_worker(
                 worker_id=worker_idx,
                 worker_slot=CuratorWorkerSlot(
-                    bucket_id=worker_idx,
+                    worker_id=worker_idx,
                     process=process,  # 由 executor 启动后返回的 Future 对象管理
                     command_queue=bucket_command_queue,
                     shared_memory=new_shm
@@ -277,12 +318,20 @@ class Curator(CuratorBase):
         """
         计算 bucket keys 的独立接口，适用于只需要计算 bucket keys 的场景。
         """
+        _corpus_files_path = corpus_files_path
+        if isinstance(_corpus_files_path, str): _corpus_files_path = [Path(_corpus_files_path)]
+        elif isinstance(_corpus_files_path, Path): _corpus_files_path = [_corpus_files_path]
+        elif isinstance(_corpus_files_path, list):
+            for idx, path in enumerate(_corpus_files_path):
+                if isinstance(path, str): _corpus_files_path[idx] = Path(path)
+        else: raise ValueError(f"Invalid corpus_files_path type: {type(corpus_files_path)}")
+
         self._is_running = True
         self._report_handler_thread = threading.Thread(target=self._report_handler, daemon=True)
         self._report_handler_thread.start()  # 启动报告处理线程
 
         self._compute_bucket_keys(
-            corpus_files_path=corpus_files_path,
+            corpus_files_path=_corpus_files_path,
             corpus_field_name=corpus_field_name,
             corpus_file_format=corpus_file_format,
             **kwargs

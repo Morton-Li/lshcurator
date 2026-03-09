@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Literal
 
 
 def iter_parquet_batches(parquet_path: Path | str, batch_size: int, text_field: str | list[str] | None = None) -> Iterator['pandas.DataFrame']:
@@ -24,3 +24,29 @@ def iter_jsonl_rows(file_path: Path) -> Iterator[dict]:
     with open(file_path, 'r', encoding='utf-8') as f:
         for line in f:
             yield json.loads(line)
+
+
+def iter_corpus_texts(
+    corpus_files_path: str | Path | list[str | Path],
+    corpus_field_name: str | list[str],
+    corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
+    **kwargs
+) -> Iterator[str]:
+    """迭代语料文本内容的生成器，支持多文件和多字段"""
+    if isinstance(corpus_field_name, str): corpus_field_name = [corpus_field_name]
+
+    if corpus_file_format == 'parquet':
+        for file_path in corpus_files_path:
+            for batch in iter_parquet_batches(
+                parquet_path=file_path,
+                batch_size=kwargs.get('batch_size', 2048),
+                text_field=corpus_field_name,
+            ):
+                for sample in batch.stack():
+                    yield str(sample)
+    elif corpus_file_format == 'jsonl':
+        for file_path in corpus_files_path:
+            for row in iter_jsonl_rows(file_path=file_path):
+                for field in corpus_field_name:
+                    yield str(row[field])
+    else: raise ValueError(f"Unsupported file format: {corpus_file_format}")

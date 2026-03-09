@@ -23,6 +23,13 @@ class ShardMemorySpec:
 
 
 @dataclass(frozen=True, slots=True)
+class ShardMemoryReport:
+    ShmSpec: ShardMemorySpec
+    written: int
+    message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ShmBucketCommand:
     action: str
     kwargs: dict | None = None

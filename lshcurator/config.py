@@ -34,12 +34,6 @@ class BucketConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class CandidateSelectorConfig(BucketConfig):
-    @property
-    def num_perm(self) -> int: return self.bands * self.rows_per_band
-
-
-@dataclass(frozen=True, slots=True)
 class DeduperConfig:
     bands: int
     rows_per_band: int
@@ -59,10 +53,13 @@ class CuratorConfig:
     shingle_step: int
     bands: int
     rows_per_band: int
+    similarity_threshold: float
     compute_mode: ComputeMode = 'char'
 
     max_workers: int = 8
     chunk_elements: int = 1_000_000  # 每次分配共享内存的元素数量
+
+    max_representatives_per_bucket: int | None = None
 
     @property
     def shm_chunk_nbytes(self) -> int: return self.chunk_elements * numpy.dtype('uint64').itemsize

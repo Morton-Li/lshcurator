@@ -30,6 +30,19 @@ class ShardMemoryReport:
     message: str | None = None
 
 
+@dataclass(slots=True, kw_only=True)
+class WorkerSlot:
+    process: Process
+    worker_id: int | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class WorkerReport:
+    worker_id: int
+    status: Literal['complete', 'error', 'running']
+    message: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ShmBucketCommand:
     action: str

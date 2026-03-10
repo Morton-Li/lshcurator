@@ -44,30 +44,23 @@ class WorkerReport:
 
 
 @dataclass(frozen=True, slots=True)
-class ShmBucketCommand:
+class BucketWorkerCommand:
     action: str
     kwargs: dict | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class ShmBucketReport:
-    worker_idx: int
+@dataclass(slots=True, kw_only=True)
+class BucketWorkerReport(WorkerReport):
     ShmSpec: ShardMemorySpec
     written: int
-    status: Literal['complete', 'error', 'processing']
-    action: Literal['merge', 'clear'] | None = None  # 请求主进程的动作(扩容、清理等)，仅在 status='processing' 时有效
-    message: str | None = None
+    action: Literal['merge'] | None = None  # 请求主进程的动作，仅在 status='running' 时有效
+
+    def __post_init__(self):
+        if self.status != 'running' and self.action is not None:
+            raise ValueError('Action must be None when status is not "running"')
 
 
-@dataclass(frozen=True, slots=True)
-class ShmBucketQueueGroups:
-    report_queue: Queue[ShmBucketReport]  # 从 bucket 进程到主进程的报告队列
-    command_queue: Queue[ShmBucketCommand]  # 从主进程到 bucket 进程的命令队列
-
-
-@dataclass(slots=True)
-class CuratorWorkerSlot:
-    worker_id: int
-    process: Process
-    command_queue: Queue[ShmBucketCommand]
+@dataclass(slots=True, kw_only=True)
+class CuratorWorkerSlot(WorkerSlot):
+    command_queue: Queue[BucketWorkerCommand]
     shared_memory: shared_memory.SharedMemory

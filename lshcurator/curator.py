@@ -138,25 +138,6 @@ class Curator(CuratorBase):
             # 将 bucket keys 合并到全局数组中
             self.bucket_keys.append(bucket_keys_array[:n_written].copy())  # 复制数据以避免共享内存被覆盖
 
-    def _alloc_shared_memory_for_bucket(self, worker_id: int) -> None:
-        """为指定 bucket 分配新的共享内存，并通过命令队列通知对应的 worker 进程刷新其共享内存映射。"""
-        worker_slot = self.get_worker(worker_id=worker_id)
-        if worker_slot is None:
-            raise RuntimeError(f"Worker {worker_id} not found")
-
-        worker_slot.shared_memory.close()
-        worker_slot.shared_memory.unlink()
-        shm = shared_memory.SharedMemory(create=True, size=self.config.shm_chunk_nbytes)
-        worker_slot.shared_memory = shm
-
-        shm_spec = ShardMemorySpec(name=shm.name, n_elements=self.config.chunk_elements)
-        worker_slot.command_queue.put(ShmBucketCommand(
-            action='refresh_shm',
-            kwargs={'new_shm_spec': shm_spec}
-        ))
-
-        self.set_worker(worker_id=worker_id, worker_slot=worker_slot)  # 更新 worker 映射中的共享内存信息
-
     def process_corpus(
         self,
         corpus_files_path: str | Path | list[str | Path],

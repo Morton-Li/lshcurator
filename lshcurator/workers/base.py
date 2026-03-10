@@ -1,3 +1,16 @@
+# Copyright 2026 Morton Li. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import multiprocessing
 import threading
 from abc import ABC, abstractmethod
@@ -10,17 +23,18 @@ from ..utils.types import WorkerSlot, WorkerReport
 
 class WorkerBase(ABC):
     """Base class for workers."""
-    def __init__(self, worker_id: int, report_queue: multiprocessing.Queue[WorkerReport]):
+    def __init__(self, *, worker_id: int, report_queue: multiprocessing.Queue[WorkerReport], **kwargs):
         """
         Args:
             worker_id (int): Worker 的唯一标识符，主进程通过此 ID 来区分不同的 worker 进程。
             report_queue (multiprocessing.Queue): 用于向主进程发送报告的队列，worker 进程通过此队列将状态和结果报告给主进程。
         """
-        self.worker_id = worker_id
-        self.report_queue = report_queue
+        super().__init__(**kwargs)
+        self.worker_id: int = worker_id
+        self.report_queue: multiprocessing.Queue[WorkerReport] = report_queue
 
     @abstractmethod
-    def job(self):
+    def job(self, **kwargs):
         """Worker 的具体任务逻辑"""
         raise NotImplementedError('Subclasses must implement job to define the worker\'s task logic')
 
@@ -29,15 +43,17 @@ class WorkerBase(ABC):
         self.report_queue.put(WorkerReport(worker_id=self.worker_id, status='complete', message='Worker task completed successfully'))
 
 
-def _run_worker(**kwargs):
+def _run_worker(
+    worker_cls: Callable[..., WorkerBase],
+    worker_id: int,
+    report_queue: multiprocessing.Queue[WorkerReport],
+    worker_init_kwargs: dict,
+    job_kwargs: dict,
+):
     """Worker 进程的入口函数，负责创建 Worker 实例并执行任务"""
-    worker_cls: Callable[..., WorkerBase] = kwargs.pop('worker_cls')  # 从 kwargs 中获取 worker_cls，确保它被正确传递
-    worker_id: int = kwargs.pop('worker_id')
-    report_queue: multiprocessing.Queue[WorkerReport] = kwargs.pop('report_queue')
     try:
-        worker = worker_cls(worker_id=worker_id, report_queue=report_queue, **kwargs)  # 创建 Worker 实例，传递 worker_id 和 report_queue 以及其他必要参数
-        worker.job()  # 执行 Worker 的具体任务逻辑
-        worker.complete()  # 向主进程报告任务完成
+        worker = worker_cls(worker_id=worker_id, report_queue=report_queue, **worker_init_kwargs)  # 创建 Worker 实例，传递 worker_id 和 report_queue 以及其他必要参数
+        worker.job(**job_kwargs)  # 执行 Worker 的具体任务逻辑
     except Exception as e:
         report_queue.put(WorkerReport(worker_id=worker_id, status='error', message=f'Worker encountered an error: {str(e)}'))  # 向主进程报告错误
 
@@ -94,20 +110,23 @@ class WorkerManagerBase(ABC):
         if worker_id is not None and worker_id in self.worker_slots: raise IndexError(f'Worker slot {worker_id} already exists')
         self._add_subprocess_queue.put(slot)
 
-    def add_subprocess(self, worker_cls: Callable[..., WorkerBase], kwargs: dict | None = None) -> int:
+    def add_subprocess(self, worker_cls: Callable[..., WorkerBase], worker_init_kwargs: dict | None = None, job_kwargs: dict | None = None) -> int:
         """创建一个新的 worker slot 并添加到队列中，target 是 worker 进程的入口函数，args 和 kwargs 是传递给 target 的参数"""
-        kwargs = kwargs or {}
-        kwargs.update({
-            'worker_cls': worker_cls,
-            'worker_id': self._allocate_worker_slot_id(),  # 自动分配一个新的 worker slot ID，确保不与现有 ID 冲突
-            'report_queue': self._worker_report_queue,  # 将报告队列传递给 worker 进程，确保 worker 可以通过此队列向主进程发送报告
-        })
-
+        worker_id = self._allocate_worker_slot_id()  # 自动分配一个新的 worker slot ID，确保不与现有 ID 冲突
         self.add_worker_slot(WorkerSlot(
-            process=self._multiprocessing_context.Process(target=_run_worker, kwargs=kwargs),
-            worker_id=kwargs['worker_id'],
+            process=self._multiprocessing_context.Process(
+                target=_run_worker,
+                kwargs={
+                    'worker_cls': worker_cls,
+                    'worker_id': worker_id,
+                    'report_queue': self._worker_report_queue,  # 将报告队列传递给 worker 进程，确保 worker 可以通过此队列向主进程发送报告
+                    'worker_init_kwargs': worker_init_kwargs or {},  # 传递给 Worker 实例的初始化参数
+                    'job_kwargs': job_kwargs or {},  # 传递给 Worker.job 方法的参数
+                }
+            ),
+            worker_id=worker_id,
         ))
-        return kwargs['worker_id']
+        return worker_id
 
     def _add_subprocess_handler(self):
         """后台线程方法，持续监听添加 worker slot 的请求队列并处理消息"""

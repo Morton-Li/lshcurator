@@ -3,7 +3,7 @@ from multiprocessing import Queue, Event
 
 import numpy
 
-from .utils.types import ComputeMode, WorkerReport
+from .utils.types import ComputeMode, WorkerReport, ShardMemorySpec, BucketWorkerCommand
 
 
 @dataclass(slots=True, kw_only=True)
@@ -53,6 +53,25 @@ class WorkerConfig:
     stop_event: Event  # 用于通知 worker 进程停止的事件，主进程设置此事件后 worker 进程应尽快完成当前任务并退出
     report_queue: Queue[WorkerReport]  # 用于向主进程发送报告的队列，worker 进程通过此队列发送状态和结果信息
     worker_id: int | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class BucketWorkerConfig(WorkerConfig):
+    shm_spec: ShardMemorySpec
+    command_queue: Queue[BucketWorkerCommand]
+
+
+@dataclass(slots=True, kw_only=True)
+class WorkerManagerConfig:
+    max_workers: int = 1
+
+
+@dataclass(slots=True, kw_only=True)
+class BucketWorkerManagerConfig(WorkerManagerConfig):
+    chunk_elements: int = 1_000_000  # 每次分配共享内存的元素数量
+
+    @property
+    def shm_chunk_nbytes(self) -> int: return self.chunk_elements * numpy.dtype('uint64').itemsize
 
 
 @dataclass(frozen=True, slots=True)

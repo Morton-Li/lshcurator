@@ -18,7 +18,7 @@ from queue import Empty, Queue
 from time import sleep
 from typing import Callable
 
-from ..config import WorkerConfig
+from ..config import WorkerConfig, WorkerManagerConfig
 from ..utils.types import WorkerSlot, WorkerReport
 
 
@@ -66,12 +66,10 @@ def _run_worker(
 
 class WorkerManagerBase(ABC):
     """Base class for worker managers."""
-    def __init__(self, max_workers: int = 1):
-        """
-        Args:
-            max_workers (int): 最大 worker 数量，默认为 1。WorkerManagerBase 将根据此参数限制同时运行的 worker 进程数量，确保资源被合理利用。
-        """
-        self.max_workers = max_workers
+    def __init__(self, worker_manager_config: WorkerManagerConfig):
+        self._worker_manager_config: WorkerManagerConfig = worker_manager_config
+
+        self.max_workers = self._worker_manager_config.max_workers
 
         self._worker_slots_lock = threading.Lock()  # 防止主进程内多线程竞争
 
@@ -93,6 +91,10 @@ class WorkerManagerBase(ABC):
     def worker_slots(self) -> dict[int, WorkerSlot]:
         with self._worker_slots_lock:
             return dict(self._worker_slots)  # 返回 _worker_slots 的浅复制，避免外部修改原始字典
+    @property
+    def active_workers(self): return len(self._worker_slots)
+    @property
+    def is_complete(self) -> bool: return self.active_workers == 0 and self._add_subprocess_queue.qsize() == 0  # 没有活跃的 worker 且没有待处理的添加请求时认为所有任务已完成
 
     def _allocate_worker_slot_id(self) -> int:
         """自动分配一个新的 worker slot ID，确保不与现有 ID 冲突"""

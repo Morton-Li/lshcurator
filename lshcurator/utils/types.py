@@ -62,6 +62,12 @@ class BucketWorkerReport(WorkerReport):
 
 
 @dataclass(slots=True, kw_only=True)
+class BucketWorkerSlot(WorkerSlot):
+    command_queue: Queue[BucketWorkerCommand]
+    shared_memory: shared_memory.SharedMemory
+
+
+@dataclass(slots=True, kw_only=True)
 class CuratorWorkerSlot(WorkerSlot):
     command_queue: Queue[BucketWorkerCommand]
     shared_memory: shared_memory.SharedMemory

@@ -11,132 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import multiprocessing
-import threading
-from multiprocessing import Queue, shared_memory
 from multiprocessing.connection import wait
 from pathlib import Path
-from queue import Empty
 from time import sleep
 from typing import Literal, Iterator
 
 import numpy
 
-from .bucket import bucket_worker
-from .config import CuratorConfig, BucketConfig, DeduperConfig
+from .config import CuratorConfig, DeduperConfig
 from .deduper import Deduper
 from .utils.readers import iter_corpus_texts
-from .utils.types import (
-    ShmBucketReport, CuratorWorkerSlot, ShardMemorySpec, ShmBucketCommand, ShmBucketQueueGroups,
-)
 
 
-class CuratorBase:
+class Curator:
     def __init__(self, config: CuratorConfig):
-        self.config = config  # config 已配置 frozen 不可变，可以放心暴露
-
-        self._is_running = False  # 进程是否正在运行的标志，控制报告处理线程的生命周期
-
-        self._multiprocessing_context = multiprocessing.get_context(method='spawn')  # 使用 'spawn' 启动多进程，确保兼容性和稳定性
-
-        self.bucket_keys: list[numpy.ndarray] = []  # 全局 bucket keys 列表
-
-        self._report_queue: Queue[ShmBucketReport] = self._multiprocessing_context.Queue()
-        self._workers_lock = threading.Lock()
-        self._workers: dict[int, CuratorWorkerSlot] = {}
-
-        # 负责监听 worker 进程报告的线程
-        self._report_handler_thread: threading.Thread
-
-    @property
-    def worker_count(self) -> int:
-        with self._workers_lock:
-            return len(self._workers)
-    def get_worker(self, worker_id: int) -> CuratorWorkerSlot | None:
-        with self._workers_lock:
-            return self._workers.get(worker_id, None)
-    def worker_slots(self, snapshot: bool = True) -> list[CuratorWorkerSlot]:
-        with self._workers_lock:
-            return list(self._workers.values()) if snapshot else self._workers.values()
-    def pop_worker(self, worker_id: int) -> CuratorWorkerSlot | None:
-        slot = self.get_worker(worker_id=worker_id)
-        if slot is None: raise KeyError(f"Worker {worker_id} not found")
-        slot.process.join(timeout=8)
-        if slot.process.is_alive():
-            # 等待多时进程未退出
-            print(f'Worker process {slot.process.name} did not exit in time, terminating forcefully.')
-            # 强制终止
-            slot.process.terminate()
-            slot.process.join()  # 确保进程资源被回收
-        if slot.process.exitcode != 0:
-            print(f'Worker process {slot.process.name} exited with code {slot.process.exitcode}')
-        slot.command_queue.close()
-        slot.shared_memory.close()
-        slot.shared_memory.unlink()
-        with self._workers_lock:
-            return self._workers.pop(worker_id, None)
-    @property
-    def worker_mapping(self) -> dict[int, CuratorWorkerSlot]:
-        with self._workers_lock:
-            return dict(self._workers)  # 返回 workers 的浅复制，避免外部修改原始字典
-    def set_worker(self, worker_id: int, worker_slot: CuratorWorkerSlot) -> None:
-        with self._workers_lock:
-            self._workers[worker_id] = worker_slot
-
-
-class Curator(CuratorBase):
-    def _report_handler(self):
-        """持续监听 worker 进程的报告队列"""
-        while self._is_running:
-            try:
-                report: ShmBucketReport = self._report_queue.get(timeout=1)  # 等待报告，超时后继续循环检查
-            except Empty: continue  # 没有报告，继续等待
-
-            if report.status == 'processing':
-                if report.action == 'merge':
-                    self._merge_bucket_keys(worker_id=report.worker_idx, n_written=report.written)
-                    target_slot = self.get_worker(report.worker_idx)
-                    if target_slot is None:
-                        print(f'Received merge report for unknown worker {report.worker_idx}, message: {report.message}')
-                        self._is_running = False
-                        raise RuntimeError(f'Unknown worker ID in merge report: {report.worker_idx}')
-                    target_slot.command_queue.put(ShmBucketCommand(
-                        action='ready', kwargs={'is_ready': True}
-                    ))
-                    continue
-                else:
-                    print(f'Received unknown processing action: {report.action} from worker {report.worker_idx}, message: {report.message}')
-                    self._is_running = False
-                    raise RuntimeError(f'Unknown processing action: {report.action}')
-            elif report.status == 'complete':
-                self._merge_bucket_keys(worker_id=report.worker_idx, n_written=report.written)
-
-                target_slot = self.get_worker(report.worker_idx)
-                if target_slot is None:
-                    print(f'Received complete report for unknown worker {report.worker_idx}, message: {report.message}')
-                    self._is_running = False
-                    raise RuntimeError(f'Unknown worker ID in complete report: {report.worker_idx}')
-                target_slot.command_queue.put(ShmBucketCommand(action='<|Exit|>'))  # 命令 worker 进程退出
-                self.pop_worker(report.worker_idx)
-                continue
-            else:
-                # 未知状态
-                print(f'Received unknown report status: {report.status} from worker {report.worker_idx}, message: {report.message}')
-                self._is_running = False
-                raise RuntimeError(f'Unknown report status: {report.status}')
-
-    def _merge_bucket_keys(self, worker_id: int, n_written: int) -> None:
-        """将指定 bucket 的 keys 合并到全局 bucket keys 数组中，按需扩展全局数组大小。"""
-        worker_slot = self.get_worker(worker_id=worker_id)
-        if worker_slot is None:
-            raise RuntimeError(f"Worker {worker_id} not found")
-
-        shm = worker_slot.shared_memory
-        # 从共享内存中读取 bucket keys 数据
-        bucket_keys_array = numpy.ndarray(shape=(self.config.chunk_elements,), dtype=numpy.uint64, buffer=shm.buf)
-        if n_written > 0:
-            # 将 bucket keys 合并到全局数组中
-            self.bucket_keys.append(bucket_keys_array[:n_written].copy())  # 复制数据以避免共享内存被覆盖
+        self.config = config
 
     def process_corpus(
         self,
@@ -225,11 +114,7 @@ class Curator(CuratorBase):
         **kwargs
     ) -> None:
         """计算 bucket keys"""
-        self._is_running = True
-        self._report_handler_thread = threading.Thread(target=self._report_handler, daemon=True)
-        self._report_handler_thread.start()  # 启动报告处理线程
 
-        self.bucket_keys.clear()  # 清空全局 bucket keys 数组
 
         # 创建多进程
         max_workers = min(self.config.max_workers, len(corpus_files_path))
@@ -242,85 +127,7 @@ class Curator(CuratorBase):
                 if sentinels: wait(sentinels)  # 阻塞等待任一 worker 进程完成
                 sleep(1)  # 等待一段时间让报告处理线程处理完成报告，确保资源被正确回收
 
-            worker_idx = file_idx
-            bucket_config = BucketConfig(
-                shingle_k=self.config.shingle_k,
-                shingle_step=self.config.shingle_step,
-                bands=self.config.bands,
-                rows_per_band=self.config.rows_per_band,
-                compute_mode=self.config.compute_mode,
-            )
-            new_shm = shared_memory.SharedMemory(create=True, size=self.config.shm_chunk_nbytes)
-            shm_spec = ShardMemorySpec(
-                name=new_shm.name,
-                n_elements=self.config.chunk_elements,
-            )
-            bucket_command_queue = self._multiprocessing_context.Queue()
-            queue_group = ShmBucketQueueGroups(
-                report_queue=self._report_queue,
-                command_queue=bucket_command_queue
-            )
-            job_kwargs = {
-                'file_path': file_path,
-                'field_name': corpus_field_name,
-                'file_format': corpus_file_format,
-            }
-            if kwargs is not None:
-                job_kwargs.update(kwargs)
-
-            process = self._multiprocessing_context.Process(
-                target=bucket_worker,
-                kwargs={
-                    'config': bucket_config,
-                    'shm_spec': shm_spec,
-                    'queue_group': queue_group,
-                    'job_kwargs': job_kwargs,
-                    'worker_idx': worker_idx
-                },
-                name=f'BucketWorker-{worker_idx}'
-            )
-            process.start()
-
-            self.set_worker(
-                worker_id=worker_idx,
-                worker_slot=CuratorWorkerSlot(
-                    worker_id=worker_idx,
-                    process=process,  # 由 executor 启动后返回的 Future 对象管理
-                    command_queue=bucket_command_queue,
-                    shared_memory=new_shm
-                )
-            )
 
         # 确保所有进程均运行完毕后再返回
         while self.worker_count > 0: sleep(1)
 
-        self._is_running = False
-        self._report_handler_thread.join()  # 等待报告处理线程退出，设置超时以防止死锁
-        return None
-
-    def compute_bucket_keys(
-        self,
-        corpus_files_path: str | Path | list[str | Path],
-        corpus_field_name: str | list[str],
-        corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
-        **kwargs
-    ) -> numpy.ndarray:
-        """
-        计算 bucket keys 的独立接口，适用于只需要计算 bucket keys 的场景。
-        """
-        _corpus_files_path = corpus_files_path
-        if isinstance(_corpus_files_path, str): _corpus_files_path = [Path(_corpus_files_path)]
-        elif isinstance(_corpus_files_path, Path): _corpus_files_path = [_corpus_files_path]
-        elif isinstance(_corpus_files_path, list):
-            for idx, path in enumerate(_corpus_files_path):
-                if isinstance(path, str): _corpus_files_path[idx] = Path(path)
-        else: raise ValueError(f"Invalid corpus_files_path type: {type(corpus_files_path)}")
-
-        self._compute_bucket_keys(
-            corpus_files_path=_corpus_files_path,
-            corpus_field_name=corpus_field_name,
-            corpus_file_format=corpus_file_format,
-            **kwargs
-        )
-
-        return numpy.concatenate(self.bucket_keys) if len(self.bucket_keys) > 0 else numpy.array([], dtype=numpy.uint64)

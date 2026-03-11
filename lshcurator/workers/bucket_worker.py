@@ -158,7 +158,7 @@ class BucketWorker(WorkerBase, BucketBase):
         return self.complete()
 
 
-class BucketKeyWorkerManager(WorkerManagerBase):
+class BucketWorkerManager(WorkerManagerBase):
     # 显式声明以满足类型检查器
     _worker_slots: dict[int, BucketWorkerSlot]
     worker_slots: dict[int, BucketWorkerSlot]
@@ -227,6 +227,12 @@ class BucketKeyWorkerManager(WorkerManagerBase):
         ))
         return worker_id
 
+    def remove_worker_slot_extra(self, slot: BucketWorkerSlot) -> None:
+        """移除 worker slot 以外的资源，确保 worker slot 中的共享内存和命令队列被正确关闭和清理"""
+        slot.shared_memory.close()  # 关闭共享内存对象
+        slot.shared_memory.unlink()  # 解除共享内存对象，确保系统资源被释放
+        slot.command_queue.close()  # 关闭命令队列，确保系统资源被释放
+
     def run(
         self,
         corpus_files_path: str | Path | list[str | Path],
@@ -263,5 +269,6 @@ class BucketKeyWorkerManager(WorkerManagerBase):
             file_path_worker_mapping[file_path] = worker_id
 
         while not self.is_complete: sleep(1)  # 等待所有 worker 完成任务
+        self.stop()
 
         return numpy.concatenate(self.bucket_keys) if len(self.bucket_keys) > 0 else numpy.array([], dtype=numpy.uint64)

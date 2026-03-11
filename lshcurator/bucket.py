@@ -61,6 +61,11 @@ class BucketBase(ABC):
         )
         self.append_keys(band_keys)
 
+    def clear(self) -> None:
+        """Clear all keys from the bucket."""
+        # 子类应根据实际存储结构实现清空逻辑，这里只重置了 keys_written 指针
+        self._keys_written = 0
+
 
 class Bucket(BucketBase):
     def __init__(self, bucket_config: BucketConfig):
@@ -96,4 +101,4 @@ class Bucket(BucketBase):
     def clear(self) -> None:
         """Clear all keys from the bucket."""
         self._keys = numpy.empty(1_000_000, dtype=numpy.uint64)  # 重置为初始大小防止已创建的数组过大白白占用内存
-        self._keys_written = 0
+        super().clear()

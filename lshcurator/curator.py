@@ -11,16 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from multiprocessing.connection import wait
 from pathlib import Path
-from time import sleep
 from typing import Literal, Iterator
 
 import numpy
 
-from .config import CuratorConfig, DeduperConfig
+from .config import CuratorConfig, DeduperConfig, BucketConfig, BucketWorkerManagerConfig
 from .deduper import Deduper
 from .utils.readers import iter_corpus_texts
+from .workers.bucket_worker import BucketWorkerManager
 
 
 class Curator:
@@ -59,19 +58,18 @@ class Curator:
         else: raise ValueError(f"Invalid corpus_files_path type: {type(corpus_files_path)}")
 
         # 1. Compute bucket keys
-        self._compute_bucket_keys(
+        bucket_keys = self.compute_bucket_keys(
             corpus_files_path=_corpus_files_path,
             corpus_field_name=corpus_field_name,
             corpus_file_format=corpus_file_format,
             **kwargs
         )
 
-        if len(self.bucket_keys) == 0:
+        bucket_keys_count = len(bucket_keys)
+        if bucket_keys_count == 0:
             print("No bucket keys were computed.")
             return # 没有 bucket keys，直接返回空迭代器
-        bucket_keys = numpy.concatenate(self.bucket_keys)  # 将所有 bucket keys 合并成一个大数组
-        print(f"Total bucket keys computed: {len(bucket_keys)}")
-        self.bucket_keys.clear()  # 清空全局 bucket keys 列表，释放内存
+        print(f"Total bucket keys computed: {bucket_keys_count}")
 
         if filter_low_freq_bucket_keys is not None:
             unique_keys, key_counts = numpy.unique(bucket_keys, return_counts=True)  # unique 会返回有序结果无需 sort
@@ -106,28 +104,30 @@ class Curator:
             not_duplicated: bool = deduper(text)
             yield text, not_duplicated  # 生成器逐条返回文本和去重结果
 
-    def _compute_bucket_keys(
+    def compute_bucket_keys(
         self,
-        corpus_files_path: str | Path | list[str | Path],
+        corpus_files_path: list[Path],
         corpus_field_name: str | list[str],
         corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
         **kwargs
-    ) -> None:
+    ) -> numpy.ndarray[numpy.uint64]:
         """计算 bucket keys"""
-
-
-        # 创建多进程
-        max_workers = min(self.config.max_workers, len(corpus_files_path))
-        for file_idx, file_path in enumerate(corpus_files_path):
-            while self.worker_count >= max_workers:
-                if not self._is_running: return None
-                # 先取镜像避免被报告处理进程 delete worker_slot 后访问空槽位导致 KeyError
-                worker_slots = self.worker_slots(snapshot=True)
-                sentinels = [slot.process.sentinel for slot in worker_slots]
-                if sentinels: wait(sentinels)  # 阻塞等待任一 worker 进程完成
-                sleep(1)  # 等待一段时间让报告处理线程处理完成报告，确保资源被正确回收
-
-
-        # 确保所有进程均运行完毕后再返回
-        while self.worker_count > 0: sleep(1)
-
+        bucket_worker_manager = BucketWorkerManager(
+            bucket_config=BucketConfig(
+                shingle_k=self.config.shingle_k,
+                shingle_step=self.config.shingle_step,
+                bands=self.config.bands,
+                rows_per_band=self.config.rows_per_band,
+                compute_mode=self.config.compute_mode,
+            ),
+            bucket_worker_manager_config=BucketWorkerManagerConfig(
+                max_workers=self.config.max_workers,
+                chunk_elements=self.config.chunk_elements,  # 每次分配共享内存的元素数量
+            )
+        )
+        return bucket_worker_manager.run(
+            corpus_files_path=corpus_files_path,
+            corpus_field_name=corpus_field_name,
+            corpus_file_format=corpus_file_format,
+            **kwargs
+        )

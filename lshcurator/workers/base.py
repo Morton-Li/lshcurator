@@ -36,7 +36,7 @@ class WorkerBase(ABC):
     @property
     def worker_id(self) -> int: return self._worker_config.worker_id
     @property
-    def report_queue(self) -> multiprocessing.Queue[WorkerReport]: return self._worker_config.report_queue
+    def report_queue(self) -> Queue[WorkerReport]: return self._worker_config.report_queue
     @property
     def stop_event(self) -> multiprocessing.Event: return self._worker_config.stop_event
 
@@ -159,11 +159,17 @@ class WorkerManagerBase(ABC):
                 self._worker_slots[slot.worker_id] = slot
             slot.process.start()  # 启动对应的 worker 进程
 
+    def remove_worker_slot_extra(self, slot: WorkerSlot) -> None:
+        """移除指定 idx 的 worker slot 附加脚本，子类可重写此方法来实现特定的资源清理逻辑"""
+        pass  # 默认不执行任何操作，子类可以根据需要重写此方法来实现特定的资源清理逻辑
+
     def remove_worker_slot(self, worker_id: int) -> None:
         """移除指定 idx 的 worker slot"""
         with self._worker_slots_lock:  # 全程持锁防止同时释放同一 worker slot 导致的竞争条件
             if worker_id not in self._worker_slots: return  # worker_id 不存在，无需移除
             self.stop_subprocesses(worker_id=worker_id)  # 停止 worker 进程，确保资源被正确释放
+            slot: WorkerSlot = self._worker_slots[worker_id]
+            self.remove_worker_slot_extra(slot=slot)  # 执行移除 worker slot 的附加脚本，子类可重写 remove_worker_slot_extra 来实现特定的资源清理逻辑
             del self._worker_slots[worker_id]  # 从 worker_slots 中移除 worker slot
             self._worker_slots_ids.remove(worker_id)  # 从 worker slot ID 列表中移除 worker_id，确保未来分配的新 ID 不会与已存在的 ID 冲突
 

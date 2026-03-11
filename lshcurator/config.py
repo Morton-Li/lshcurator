@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from multiprocessing import Queue, Event
+from multiprocessing import Event
+from queue import Queue
 
 import numpy
 

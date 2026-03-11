@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from multiprocessing import Process, shared_memory
+from multiprocessing import Process, shared_memory, Event
 from multiprocessing.queues import Queue
 from typing import TypeAlias, Literal
 
@@ -33,6 +33,7 @@ class ShardMemoryReport:
 @dataclass(slots=True, kw_only=True)
 class WorkerSlot:
     process: Process
+    stop_event: Event  # 用于通知 worker 进程停止的事件，主进程设置此事件后 worker 进程应尽快完成当前任务并退出
     worker_id: int | None = None
 
 

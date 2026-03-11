@@ -1,11 +1,12 @@
 from dataclasses import dataclass
+from multiprocessing import Queue, Event
 
 import numpy
 
-from .utils.types import ComputeMode
+from .utils.types import ComputeMode, WorkerReport
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True, kw_only=True)
 class BucketConfig:
     """
     Args:
@@ -45,6 +46,13 @@ class DeduperConfig:
 
     @property
     def num_perm(self) -> int: return self.bands * self.rows_per_band
+
+
+@dataclass(slots=True, kw_only=True)
+class WorkerConfig:
+    stop_event: Event  # 用于通知 worker 进程停止的事件，主进程设置此事件后 worker 进程应尽快完成当前任务并退出
+    report_queue: Queue[WorkerReport]  # 用于向主进程发送报告的队列，worker 进程通过此队列发送状态和结果信息
+    worker_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

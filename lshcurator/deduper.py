@@ -21,6 +21,7 @@ class Deduper:
             raise ValueError(f'similarity_threshold must be in [0, 1], got {self.config.similarity_threshold}')
 
         self._bucket_keys: numpy.ndarray = bucket_keys
+        self._bucket_keys.sort()
         self._buckets: dict[int, HashRepresentatives] = {}
 
     @property

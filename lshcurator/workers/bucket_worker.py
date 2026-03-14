@@ -85,16 +85,24 @@ class BucketWorker(WorkerBase, BucketBase):
         if self.stop_event.is_set(): return  # 收到停止事件，退出方法
 
         if not isinstance(keys, numpy.ndarray): raise ValueError("Keys must be a numpy array")
-        new_len = self.keys_written + len(keys)
+        keys_len = len(keys)
+        if self._bucket_config.key_layout == 'row_bands':
+            if self._keys_written % self._bucket_config.bands != 0: raise ValueError("Bands must be positive for row_bands layout")
+            if keys_len % self._bucket_config.bands != 0: raise ValueError(f"Keys length ({keys_len}) must be a multiple of bands ({self._bucket_config.bands}) for row_bands layout")
+
+        new_len = self.keys_written + keys_len
         if new_len > self._keys.size:
             # 计算最大允许写入量并部分写入
             deficit = new_len - self._keys.size
-            if deficit < len(keys):
-                self._keys[self.keys_written:self._keys.size] = keys[:len(keys) - deficit]
+            if self._bucket_config.key_layout == 'row_bands' and deficit % self._bucket_config.bands != 0:
+                # 对于 row_bands 布局，需要确保写入的 keys 数量是 bands 的整数倍
+                deficit = ((deficit + self._bucket_config.bands - 1) // self._bucket_config.bands) * self._bucket_config.bands
+
+            if deficit < keys_len:
+                self._keys[self.keys_written:self._keys.size] = keys[:keys_len - deficit]
                 self._keys_written = self._keys.size
                 self._report_merge_request()  # 向上游报告当前数据已准备好合并到全局 bucket keys 数组中
-                keys = keys[len(keys) - deficit:]  # 更新剩余未写入的 keys
-                self.append_keys(keys)
+                self.append_keys(keys[keys_len - deficit:])  # 更新剩余未写入的 keys
             else:
                 # 如果剩余 keys 一个都写不下，直接通知上游合并当前数据
                 self._report_merge_request()
@@ -169,6 +177,7 @@ class BucketWorkerManager(WorkerManagerBase):
 
         self.bucket_config: BucketConfig = bucket_config  # 全局 bucket 配置
         self.bucket_keys: list[numpy.ndarray] = []  # 全局 bucket keys 列表
+        self.worker_info: dict[int, dict] = {}
 
     def work_report_handler(self, report: BucketWorkerReport) -> None:
         if report.status == 'running':
@@ -193,8 +202,13 @@ class BucketWorkerManager(WorkerManagerBase):
         # 从共享内存中读取 bucket keys 数据
         bucket_keys_array = numpy.ndarray(shape=(self._worker_manager_config.chunk_elements,), dtype=numpy.uint64, buffer=shm.buf)
         if n_written > 0:
+            bucket_keys_array = bucket_keys_array[:n_written].copy()  # 只读取已写入部分
+            if self.bucket_config.key_layout == 'row_bands' and n_written % self.bucket_config.bands != 0:
+                raise ValueError(f"Worker {worker_id} reported keys count ({n_written}) is not a multiple of bands ({self.bucket_config.bands}) for row_bands layout")
             # 将 bucket keys 合并到全局数组中
-            self.bucket_keys.append(bucket_keys_array[:n_written].copy())  # 复制数据以避免共享内存被覆盖
+            chunk_idx = len(self.bucket_keys)
+            self.bucket_keys.append(bucket_keys_array)  # 复制数据以避免共享内存被覆盖
+            self.worker_info[worker_id]['chunk'].append(chunk_idx)  # 无并发追加 chunk 索引稳定
 
     def add_subprocess(self, worker_cls: Callable[..., WorkerBase], worker_init_kwargs: dict | None = None, job_kwargs: dict | None = None) -> int:
         """创建一个新的 worker slot 并添加到队列中，target 是 worker 进程的入口函数，args 和 kwargs 是传递给 target 的参数"""
@@ -251,7 +265,6 @@ class BucketWorkerManager(WorkerManagerBase):
 
         self.bucket_keys.clear()  # 清空全局 bucket keys 数组
 
-        file_path_worker_mapping = {}
         for file_idx, file_path in enumerate(_corpus_files_path):
             worker_id = self.add_subprocess(
                 worker_cls=BucketWorker,
@@ -266,9 +279,28 @@ class BucketWorkerManager(WorkerManagerBase):
                 },
             )
             # 记录文件路径与 worker_id 的映射关系，以便后续使用
-            file_path_worker_mapping[file_path] = worker_id
+            self.worker_info[worker_id] = {
+                'file': {
+                    'path': file_path,
+                    'format': corpus_file_format,
+                    'name': file_path.name,
+                },
+                'chunk': []
+            }
 
         while not self.is_complete: sleep(1)  # 等待所有 worker 完成任务
         self.stop()
 
-        return numpy.concatenate(self.bucket_keys) if len(self.bucket_keys) > 0 else numpy.array([], dtype=numpy.uint64)
+        # 没有 bucket keys，返回空数组
+        if len(self.bucket_keys) <= 0:
+            if self.bucket_config.key_layout == 'row_bands': return numpy.empty((0, self.bucket_config.bands), dtype=numpy.uint64)
+            elif self.bucket_config.key_layout == 'flat': return numpy.array([], dtype=numpy.uint64)
+            else: raise ValueError(f"Invalid key_layout: {self.bucket_config.key_layout}")
+
+        bucket_keys = numpy.concatenate(self.bucket_keys)
+        if self.bucket_config.key_layout == 'row_bands':
+            if bucket_keys.size % self.bucket_config.bands != 0:
+                raise ValueError(f"Total bucket keys count ({bucket_keys.size}) is not a multiple of bands ({self.bucket_config.bands})")
+            bucket_keys = bucket_keys.reshape(-1, self.bucket_config.bands)  # 将全局 bucket keys 数组重新组织成 (num_samples, bands) 的二维结构，每行对应一个样本的所有 band keys
+
+        return bucket_keys

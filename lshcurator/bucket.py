@@ -32,13 +32,6 @@ class BucketBase(ABC):
         self._keys: numpy.ndarray
         self._keys_written: int = 0  # 记录 keys 已写入长度指针
 
-    @abstractmethod
-    def append_keys(self, keys: numpy.ndarray[numpy.uint64]) -> None: ...
-    @property
-    def keys(self) -> numpy.ndarray:
-        """Return the keys currently stored in the bucket as a numpy array."""
-        if not hasattr(self, '_keys'): raise ValueError("Keys have not been initialized yet")
-        return self._keys[:self._keys_written]  # 只返回已写入部分
     @property
     def keys_written(self) -> int:
         """Return the number of keys currently written in the bucket."""
@@ -59,11 +52,37 @@ class BucketBase(ABC):
             bands=self._bucket_config.bands,
             rows_per_band=self._bucket_config.rows_per_band,
         )
+
         self.append_keys(band_keys)
+
+    @abstractmethod
+    def append_keys(self, keys: numpy.ndarray[numpy.uint64]) -> None: ...
+
+    def extract_keys(self) -> numpy.ndarray:
+        """
+        Return the keys currently stored in the bucket as a numpy array.
+        Returns:
+            numpy.ndarray:
+                Array of keys.
+                当 key_layout='flat' 时，返回 shape=(num_keys,) 的 1D 数组，每个元素是一个 key。
+                当 key_layout='row_bands' 时，返回 shape=(num_samples, bands) 的 2D 数组，每行对应一个样本的所有 band keys，列数等于 bands。
+        """
+        if not hasattr(self, '_keys'): raise ValueError("Keys have not been initialized yet")
+
+        data = self._keys[:self._keys_written].copy()  # 只返回已写入部分
+
+        if self._bucket_config.key_layout == 'flat': return data
+        elif self._bucket_config.key_layout == 'row_bands':
+            # 将 flat keys 重新组织成 (num_keys, bands) 的二维结构，每行对应一个样本的所有 band keys
+            if self._bucket_config.bands <= 0: raise ValueError("Bands must be positive for row_bands layout")
+            if self._keys_written % self._bucket_config.bands != 0:
+                raise ValueError(f"Keys written ({self._keys_written}) is not a multiple of bands ({self._bucket_config.bands})")
+            return data.reshape(-1, self._bucket_config.bands)
+        else: raise ValueError(f"Invalid key_layout: {self._bucket_config.key_layout}")
 
     def clear(self) -> None:
         """Clear all keys from the bucket."""
-        # 子类应根据实际存储结构实现清空逻辑，这里只重置了 keys_written 指针
+        # 子类应根据实际存储结构实现清空逻辑，这里只重置了 keys_written 指针（简单有效但不彻底）
         self._keys_written = 0
 
 
@@ -84,19 +103,6 @@ class Bucket(BucketBase):
             self._keys = new_array
         self._keys[self._keys_written:new_len] = keys
         self._keys_written = new_len
-
-    def batch_insert(self, texts: list[str]) -> None:
-        """Insert a batch of texts into the LSH buckets."""
-        for text in texts: self.insert(text)
-
-    def extract_keys(self, min_hit_count: int | None = None) -> numpy.ndarray:
-        """Extract the bucket keys as a numpy array."""
-        data = self._keys[:self._keys_written].copy()  # 只考虑已写入部分
-
-        keys, counts = numpy.unique(data, return_counts=True)  # unique 会返回有序结果无需 sort
-        if min_hit_count is not None:
-            keys = keys[counts >= min_hit_count]
-        return keys
 
     def clear(self) -> None:
         """Clear all keys from the bucket."""

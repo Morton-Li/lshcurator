@@ -23,8 +23,9 @@ import numpy
 from .base import WorkerBase, WorkerManagerBase, _run_worker
 from ..bucket import BucketBase
 from ..config import BucketConfig, BucketWorkerManagerConfig, BucketWorkerConfig
-from ..utils.readers import iter_parquet_batches, iter_jsonl_rows
-from ..utils.types import ShardMemorySpec, BucketWorkerReport, BucketWorkerCommand, BucketWorkerSlot
+from ..utils.normalizations import path_normalize
+from ..utils.readers import iter_corpus_texts
+from ..utils.types import ShardMemorySpec, BucketWorkerReport, BucketWorkerCommand, BucketWorkerSlot, BucketKeyChunk
 
 
 class BucketWorker(WorkerBase, BucketBase):
@@ -140,27 +141,15 @@ class BucketWorker(WorkerBase, BucketBase):
             kwargs:
                 batch_size: 仅对 parquet 有效，指定批处理大小以控制内存使用，默认为 2048
         """
-        if isinstance(field_name, str): field_name = [field_name]
-
-        if file_format == 'parquet':
-            for batch in iter_parquet_batches(
-                parquet_path=file_path,
-                batch_size=kwargs.get('batch_size', 2048),
-                text_field=field_name,
-            ):
-                for sample in batch.stack().replace(r'^\s*$', numpy.nan, regex=True).dropna().reset_index(drop=True):
-                    while self.paused: sleep(1)
-                    if self.stop_event.is_set(): return self.complete()  # 收到停止事件，退出方法
-                    self.insert(text=str(sample))
-        elif file_format == 'jsonl':
-            for row in iter_jsonl_rows(file_path=file_path):
-                for field in field_name:
-                    while self.paused: sleep(1)
-                    if self.stop_event.is_set(): return self.complete()  # 收到停止事件，退出方法
-                    content = row.get(field, '').strip()
-                    if not content: continue
-                    self.insert(text=str(content))
-        else: raise ValueError(f"Unsupported file format: {file_format}")
+        for text in iter_corpus_texts(
+            corpus_files_path=file_path,
+            corpus_field_name=field_name,
+            corpus_file_format=file_format,
+            **kwargs
+        ):
+            while self.paused: sleep(1)
+            if self.stop_event.is_set(): return self.complete()  # 收到停止事件，退出方法
+            self.insert(text=text)
 
         # 有序退出
         return self.complete()
@@ -177,7 +166,25 @@ class BucketWorkerManager(WorkerManagerBase):
 
         self.bucket_config: BucketConfig = bucket_config  # 全局 bucket 配置
         self.bucket_keys: list[numpy.ndarray] = []  # 全局 bucket keys 列表
+        self._written: int = 0
         self.worker_info: dict[int, dict] = {}
+
+    @property
+    def file_bucket_pos_mapping(self) -> dict[Path, list[BucketKeyChunk]]:
+        """ 文件到 bucket_keys 位置区间的映射；flat 下单位为 key，row_bands 下单位为 row。 """
+        file_chunk_map: dict[Path, list[BucketKeyChunk]] = {}
+        for info in self.worker_info.values():
+            file_path: Path = info['file']['path']
+            if file_chunk_map.get(file_path, None) is None: file_chunk_map[file_path] = []
+            if self.bucket_config.key_layout == 'flat': file_chunk_map[file_path].extend(info['chunks'])
+            elif self.bucket_config.key_layout == 'row_bands':
+                chunks = info['chunks']
+                for chunk in chunks:
+                    file_chunk_map[file_path].append(BucketKeyChunk(
+                        start_position=chunk.start_position // self.bucket_config.bands,
+                        size=chunk.size // self.bucket_config.bands,
+                    ))
+        return file_chunk_map
 
     def work_report_handler(self, report: BucketWorkerReport) -> None:
         if report.status == 'running':
@@ -205,10 +212,14 @@ class BucketWorkerManager(WorkerManagerBase):
             bucket_keys_array = bucket_keys_array[:n_written].copy()  # 只读取已写入部分
             if self.bucket_config.key_layout == 'row_bands' and n_written % self.bucket_config.bands != 0:
                 raise ValueError(f"Worker {worker_id} reported keys count ({n_written}) is not a multiple of bands ({self.bucket_config.bands}) for row_bands layout")
+
             # 将 bucket keys 合并到全局数组中
-            chunk_idx = len(self.bucket_keys)
+            self.worker_info[worker_id]['chunks'].append(BucketKeyChunk(
+                start_position=self._written,
+                size=n_written,
+            ))
             self.bucket_keys.append(bucket_keys_array)  # 复制数据以避免共享内存被覆盖
-            self.worker_info[worker_id]['chunk'].append(chunk_idx)  # 无并发追加 chunk 索引稳定
+            self._written += n_written
 
     def add_subprocess(self, worker_cls: Callable[..., WorkerBase], worker_init_kwargs: dict | None = None, job_kwargs: dict | None = None) -> int:
         """创建一个新的 worker slot 并添加到队列中，target 是 worker 进程的入口函数，args 和 kwargs 是传递给 target 的参数"""
@@ -254,18 +265,13 @@ class BucketWorkerManager(WorkerManagerBase):
         corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
         **kwargs
     ) -> numpy.ndarray[numpy.uint64]:
-        # 标准化输入路径格式为 list[Path]
-        _corpus_files_path = corpus_files_path
-        if isinstance(_corpus_files_path, str):  _corpus_files_path = [Path(_corpus_files_path)]
-        elif isinstance(_corpus_files_path, Path): _corpus_files_path = [_corpus_files_path]
-        elif isinstance(_corpus_files_path, list):
-            for idx, path in enumerate(_corpus_files_path):
-                if isinstance(path, str): _corpus_files_path[idx] = Path(path)
-        else: raise ValueError(f"Invalid corpus_files_path type: {type(corpus_files_path)}")
+        corpus_files_path: list[Path] = path_normalize(path=corpus_files_path)
 
         self.bucket_keys.clear()  # 清空全局 bucket keys 数组
+        self.worker_info.clear()
+        self._written = 0
 
-        for file_idx, file_path in enumerate(_corpus_files_path):
+        for file_path in corpus_files_path:
             worker_id = self.add_subprocess(
                 worker_cls=BucketWorker,
                 worker_init_kwargs={
@@ -285,7 +291,7 @@ class BucketWorkerManager(WorkerManagerBase):
                     'format': corpus_file_format,
                     'name': file_path.name,
                 },
-                'chunk': []
+                'chunks': [],  # dict[str, int]: start_position 和 size，用于记录该 worker 处理的 bucket keys 在全局 bucket keys 数组中的位置和大小
             }
 
         while not self.is_complete: sleep(1)  # 等待所有 worker 完成任务

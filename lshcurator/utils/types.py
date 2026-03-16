@@ -65,3 +65,9 @@ class BucketWorkerReport(WorkerReport):
 class BucketWorkerSlot(WorkerSlot):
     command_queue: Queue[BucketWorkerCommand]
     shared_memory: shared_memory.SharedMemory
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class BucketKeyChunk:
+    start_position: int
+    size: int

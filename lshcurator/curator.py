@@ -49,6 +49,8 @@ class Curator:
             生成器逐条返回文本和去重结果的元组 (text, not_duplicated)，其中 not_duplicated 为 True 表示该文本被认为是唯一的，False 表示该文本被认为是重复的
         """
         if self.config.similarity_threshold is None: raise ValueError("similarity_threshold must be set in config for deduplication")
+        if filter_low_freq_bucket_keys is not None and (not isinstance(filter_low_freq_bucket_keys, int) or filter_low_freq_bucket_keys < 0):
+            raise ValueError("filter_low_freq_bucket_keys must be a non-negative integer or None")
 
         corpus_files_path: list[Path] = path_normalize(path=corpus_files_path)
 
@@ -70,36 +72,25 @@ class Curator:
         print(f"Total bucket keys computed: {n_row * n_bands}")
 
         unique_keys, key_counts = numpy.unique(bucket_keys, return_counts=True)
-        singleton_keys = unique_keys[key_counts == 1]
-        if singleton_keys.size == 0:  # 重复规模特别大
-            bucket_keys_for_deduper = bucket_keys
-            trivially_unique_row_mask = numpy.zeros(bucket_keys.shape[0], dtype=bool)
-        else:
-            trivially_unique_row_mask = numpy.isin(bucket_keys, singleton_keys).all(axis=1)
-            bucket_keys_for_deduper = bucket_keys[~trivially_unique_row_mask]
+        freq: int = filter_low_freq_bucket_keys if filter_low_freq_bucket_keys is not None else 1  # 频率阈值，默认为 1 表示过滤掉所有只出现一次的 bucket keys
+        low_freq_keys = unique_keys[key_counts <= freq]  # 出现次数为 freq 的 bucket keys 的掩码
+        should_dedupe_row_mask = ~numpy.isin(bucket_keys, low_freq_keys).all(axis=1)  # bucket_keys 中所有 band keys 都是 low_freq_keys 的 row 对应的掩码，这些行无需后续 deduplication，相反的掩码表示需要进行 deduplication 的行
+        bucket_keys_for_deduper = bucket_keys[should_dedupe_row_mask]  # 把需要进行 deduplication 的行对应的 bucket keys 提取出来，形状仍然是 (num_dedupe_rows, bands)
+        deduper_bucket_keys = bucket_keys_for_deduper.reshape(-1)  # [num_dedupe_rows * bands] 展平为一维数组，包含所有需要进行 deduplication 的 bucket keys，准备后续过滤和排序
 
-        # 计算需要去重的 bucket_keys 和 rows
-        file_row_masks: dict[Path, numpy.ndarray] = {}
-        for file_path in corpus_files_path:
-            bucket_key_chunks = file_bucket_pos_mapping.get(file_path, [])
-            if len(bucket_key_chunks) == 0:
-                file_row_masks[file_path] = numpy.array([], dtype=bool)
-            else:
-                file_row_masks[file_path] = numpy.concatenate([
-                    trivially_unique_row_mask[chunk.start_position:chunk.start_position + chunk.size]
-                    for chunk in bucket_key_chunks
-                ])
-
-        deduper_bucket_keys = bucket_keys_for_deduper.reshape(-1)
-        if filter_low_freq_bucket_keys is not None:
-            unique_keys, key_counts = numpy.unique(deduper_bucket_keys, return_counts=True)  # unique 会返回有序结果无需 sort
-            filtered_keys = unique_keys[key_counts >= filter_low_freq_bucket_keys]
-            deduper_bucket_keys = filtered_keys  # 更新 bucket keys 为过滤后的结果
-        else: deduper_bucket_keys = numpy.sort(deduper_bucket_keys, axis=None)  # 排序并展平，满足后续 deduplication 中 searchsorted 的正确性要求
+        if deduper_bucket_keys.size == 0 or not should_dedupe_row_mask.any():
+            for text in iter_corpus_texts(
+                corpus_files_path=corpus_files_path,
+                corpus_field_name=corpus_field_name,
+                corpus_file_format=corpus_file_format,
+                **kwargs
+            ):
+                yield text, True
+            return
 
         # 2. 基于计算得到的 bucket keys 进行 deduplication，统计去重结果
         deduper = Deduper(
-            bucket_keys=bucket_keys,
+            bucket_keys=deduper_bucket_keys,
             config=DeduperConfig(
                 bands=self.config.bands,
                 rows_per_band=self.config.rows_per_band,

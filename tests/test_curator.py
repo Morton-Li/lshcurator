@@ -71,8 +71,32 @@ def _patch_init_deduper(monkeypatch: pytest.MonkeyPatch, results: list[bool]):
 		state['deduper'] = self.deduper
 		return self.deduper
 
-	monkeypatch.setattr(Curator, '_init_deduper', _fake_init_deduper)
+	monkeypatch.setattr(Curator, 'init_deduper', _fake_init_deduper)
 	return state
+
+
+def test_init_deduper_flattens_row_band_keys(monkeypatch: pytest.MonkeyPatch):
+	curator = _make_curator()
+	captured: dict[str, object] = {}
+
+	class FakeDeduper:
+		def __init__(self, bucket_keys: numpy.ndarray, config):
+			captured['bucket_keys'] = bucket_keys.copy()
+			captured['config'] = config
+
+	monkeypatch.setattr(curator_module, 'Deduper', FakeDeduper)
+
+	deduper = curator.init_deduper(numpy.array([[11, 12], [13, 14]], dtype=numpy.uint64))  # type: ignore[arg-type]
+
+	assert deduper is curator.deduper
+	assert numpy.array_equal(captured['bucket_keys'], numpy.array([11, 12, 13, 14], dtype=numpy.uint64))
+
+
+def test_init_deduper_rejects_non_1d_or_2d_bucket_keys():
+	curator = _make_curator()
+
+	with pytest.raises(ValueError, match='Expected bucket_keys to be either a 1D array'):
+		curator.init_deduper(numpy.zeros((1, 1, 1), dtype=numpy.uint64))  # type: ignore[arg-type]
 
 
 def test_process_corpus_requires_similarity_threshold():
@@ -104,6 +128,22 @@ def test_process_corpus_requires_row_bands_bucket_keys(monkeypatch: pytest.Monke
 		list(curator.process_corpus(file_path, 'text', corpus_file_format='jsonl'))
 
 
+def test_process_corpus_returns_empty_iterator_when_bucket_key_computation_is_empty(monkeypatch: pytest.MonkeyPatch):
+	curator = _make_curator()
+	file_path = Path('empty.jsonl')
+	iter_calls: list[dict] = []
+
+	_patch_compute_bucket_keys(
+		monkeypatch,
+		bucket_keys=numpy.empty((0, curator.config.bands), dtype=numpy.uint64),
+		mapping={file_path: []},
+	)
+	_patch_iter_corpus_texts(monkeypatch, [('unused', file_path)], calls=iter_calls)
+
+	assert list(curator.process_corpus(file_path, 'text', corpus_file_format='jsonl')) == []
+	assert iter_calls == []
+
+
 def test_process_corpus_returns_empty_iterator_when_no_selected_bucket_keys(monkeypatch: pytest.MonkeyPatch):
 	curator = _make_curator()
 	file_path = Path('unique.jsonl')
@@ -119,10 +159,38 @@ def test_process_corpus_returns_empty_iterator_when_no_selected_bucket_keys(monk
 	def _fail_init_deduper(self, bucket_keys: numpy.ndarray):
 		raise AssertionError('Deduper should not be initialized when no selected bucket keys remain')
 
-	monkeypatch.setattr(Curator, '_init_deduper', _fail_init_deduper)
+	monkeypatch.setattr(Curator, 'init_deduper', _fail_init_deduper)
 
 	assert list(curator.process_corpus(file_path, 'text', corpus_file_format='jsonl')) == []
 	assert iter_calls == []
+
+
+def test_process_corpus_filter_zero_behaves_like_one(monkeypatch: pytest.MonkeyPatch):
+	curator = _make_curator()
+	file_path = Path('threshold-zero.jsonl')
+
+	_patch_compute_bucket_keys(
+		monkeypatch,
+		bucket_keys=numpy.array([
+			[11, 12],
+			[11, 13],
+			[21, 22],
+		], dtype=numpy.uint64),
+		mapping={file_path: [BucketKeyChunk(start_position=0, size=3)]},
+	)
+	_patch_iter_corpus_texts(monkeypatch, [('a', file_path), ('b', file_path), ('c', file_path)])
+	state = _patch_init_deduper(monkeypatch, [True, False])
+
+	result = list(curator.process_corpus(
+		file_path,
+		'text',
+		corpus_file_format='jsonl',
+		filter_low_freq_bucket_keys=0,
+	))
+
+	assert result == [('a', True), ('b', False), ('c', True)]
+	assert numpy.array_equal(state['bucket_keys'], numpy.array([11], dtype=numpy.uint64))
+	assert getattr(state['deduper'], 'calls') == ['a', 'b']
 
 
 def test_process_corpus_initializes_deduper_with_selected_keys_only_and_routes_mixed_rows(monkeypatch: pytest.MonkeyPatch):
@@ -161,6 +229,43 @@ def test_process_corpus_initializes_deduper_with_selected_keys_only_and_routes_m
 	]
 	assert numpy.array_equal(state['bucket_keys'], numpy.array([201], dtype=numpy.uint64))
 	assert getattr(state['deduper'], 'calls') == ['dedupe-a1', 'dedupe-b1']
+
+
+def test_process_corpus_keeps_files_with_no_selected_rows_out_of_deduper(monkeypatch: pytest.MonkeyPatch):
+	curator = _make_curator()
+	file_a = Path('selected.jsonl')
+	file_b = Path('unselected.jsonl')
+
+	_patch_compute_bucket_keys(
+		monkeypatch,
+		bucket_keys=numpy.array([
+			[11, 12],
+			[11, 13],
+			[21, 22],
+			[23, 24],
+		], dtype=numpy.uint64),
+		mapping={
+			file_a: [BucketKeyChunk(start_position=0, size=2)],
+			file_b: [BucketKeyChunk(start_position=2, size=2)],
+		},
+	)
+	_patch_iter_corpus_texts(monkeypatch, [
+		('dedupe-1', file_a),
+		('dedupe-2', file_a),
+		('keep-1', file_b),
+		('keep-2', file_b),
+	])
+	state = _patch_init_deduper(monkeypatch, [True, False])
+
+	result = list(curator.process_corpus([file_a, file_b], 'text', corpus_file_format='jsonl'))
+
+	assert result == [
+		('dedupe-1', True),
+		('dedupe-2', False),
+		('keep-1', True),
+		('keep-2', True),
+	]
+	assert getattr(state['deduper'], 'calls') == ['dedupe-1', 'dedupe-2']
 
 
 def test_process_corpus_uses_fast_path_when_all_rows_need_deduplication(monkeypatch: pytest.MonkeyPatch):

@@ -7,7 +7,7 @@ PYTHON := python
 # 默认目标：构建 .whl
 .PHONY: build
 build:
-	$(PYTHON) tools/build_wheel.py
+	$(PYTHON) scripts/build_wheel.py
 
 # 清理构建缓存
 .PHONY: clean

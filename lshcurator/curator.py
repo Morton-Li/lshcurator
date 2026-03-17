@@ -30,7 +30,7 @@ class Curator:
 
         self.deduper: Deduper
 
-    def _init_deduper(self, bucket_keys: numpy.ndarray[numpy.uint64]) -> Deduper:
+    def init_deduper(self, bucket_keys: numpy.ndarray[numpy.uint64]) -> Deduper:
         if bucket_keys.ndim == 2: bucket_keys = bucket_keys.reshape(-1)  # 展平为一维数组，包含所有 band keys
         elif bucket_keys.ndim != 1: raise ValueError(f"Expected bucket_keys to be either a 1D array with shape (num_keys,) or a 2D array with shape (num_samples, bands), but got shape {bucket_keys.shape}.")
 
@@ -102,7 +102,7 @@ class Curator:
             return # 没有需要进行 deduplication 的 bucket keys，直接返回空迭代器
 
         # 2. 基于计算得到的 bucket keys 进行 deduplication，统计去重结果
-        self._init_deduper(bucket_keys=deduper_bucket_keys)
+        self.init_deduper(bucket_keys=deduper_bucket_keys)
 
         if should_dedupe_row_mask.all():  # 所有样本都需要 deduplication，直接逐条处理无需额外的文件行位置映射逻辑
             for text in iter_corpus_texts(

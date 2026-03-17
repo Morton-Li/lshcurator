@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from multiprocessing import Event
 from queue import Queue
+from typing import Literal
 
 import numpy
 
@@ -33,6 +34,8 @@ class BucketConfig:
     bands: int
     rows_per_band: int
     compute_mode: ComputeMode = 'char'
+
+    key_layout: Literal['flat', 'row_bands'] = 'flat'
 
 
 @dataclass(frozen=True, slots=True)

@@ -28,12 +28,32 @@ class Curator:
     def __init__(self, config: CuratorConfig):
         self.config = config
 
+        self.deduper: Deduper
+
+    def _init_deduper(self, bucket_keys: numpy.ndarray[numpy.uint64]) -> Deduper:
+        if bucket_keys.ndim == 2: bucket_keys = bucket_keys.reshape(-1)  # 展平为一维数组，包含所有 band keys
+        elif bucket_keys.ndim != 1: raise ValueError(f"Expected bucket_keys to be either a 1D array with shape (num_keys,) or a 2D array with shape (num_samples, bands), but got shape {bucket_keys.shape}.")
+
+        self.deduper = Deduper(
+            bucket_keys=bucket_keys,
+            config=DeduperConfig(
+                bands=self.config.bands,
+                rows_per_band=self.config.rows_per_band,
+                shingle_k=self.config.shingle_k,
+                shingle_step=self.config.shingle_step,
+                similarity_threshold=self.config.similarity_threshold,
+                compute_mode=self.config.compute_mode,
+                max_representatives_per_bucket=self.config.max_representatives_per_bucket,
+            )
+        )
+        return self.deduper
+
     def process_corpus(
         self,
         corpus_files_path: str | Path | list[str | Path],
         corpus_field_name: str | list[str],
         corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
-        filter_low_freq_bucket_keys: int | None = None,
+        filter_low_freq_bucket_keys: int = 1,
         **kwargs
     ) -> Iterator[tuple[str, bool]]:
         """
@@ -42,15 +62,16 @@ class Curator:
             corpus_files_path: 语料文件路径，支持单个路径或路径列表
             corpus_field_name: 语料文本字段名称，支持单个字段或字段列表
             corpus_file_format: 语料文件格式，支持 'parquet' 和 'jsonl'
-            filter_low_freq_bucket_keys: 是否过滤低频 bucket keys，传入频率阈值（例如 10）表示过滤掉出现次数低于该阈值的 bucket keys，保留高频 bucket keys 用于后续 deduplication
+            filter_low_freq_bucket_keys:
+                低频 bucket key 过滤阈值，默认 1。
+                会过滤掉出现次数小于等于该阈值的 bucket keys，仅保留更高频的 bucket keys 用于后续 deduplication。
             kwargs:
                 batch_size: 处理语料时每个批次的文本数量，仅在 corpus_file_format='parquet' 时有效，默认为 2048
         Returns:
             生成器逐条返回文本和去重结果的元组 (text, not_duplicated)，其中 not_duplicated 为 True 表示该文本被认为是唯一的，False 表示该文本被认为是重复的
         """
         if self.config.similarity_threshold is None: raise ValueError("similarity_threshold must be set in config for deduplication")
-        if filter_low_freq_bucket_keys is not None and (not isinstance(filter_low_freq_bucket_keys, int) or filter_low_freq_bucket_keys < 0):
-            raise ValueError("filter_low_freq_bucket_keys must be a non-negative integer or None")
+        if not isinstance(filter_low_freq_bucket_keys, int) or filter_low_freq_bucket_keys < 0: raise ValueError("filter_low_freq_bucket_keys must be a non-negative integer.")
 
         corpus_files_path: list[Path] = path_normalize(path=corpus_files_path)
 
@@ -72,45 +93,62 @@ class Curator:
         print(f"Total bucket keys computed: {n_row * n_bands}")
 
         unique_keys, key_counts = numpy.unique(bucket_keys, return_counts=True)
-        freq: int = filter_low_freq_bucket_keys if filter_low_freq_bucket_keys is not None else 1  # 频率阈值，默认为 1 表示过滤掉所有只出现一次的 bucket keys
-        low_freq_keys = unique_keys[key_counts <= freq]  # 出现次数为 freq 的 bucket keys 的掩码
-        should_dedupe_row_mask = ~numpy.isin(bucket_keys, low_freq_keys).all(axis=1)  # bucket_keys 中所有 band keys 都是 low_freq_keys 的 row 对应的掩码，这些行无需后续 deduplication，相反的掩码表示需要进行 deduplication 的行
-        bucket_keys_for_deduper = bucket_keys[should_dedupe_row_mask]  # 把需要进行 deduplication 的行对应的 bucket keys 提取出来，形状仍然是 (num_dedupe_rows, bands)
-        deduper_bucket_keys = bucket_keys_for_deduper.reshape(-1)  # [num_dedupe_rows * bands] 展平为一维数组，包含所有需要进行 deduplication 的 bucket keys，准备后续过滤和排序
+        freq: int = max(1, filter_low_freq_bucket_keys)  # 频率阈值，默认为 1，表示过滤掉所有出现次数小于等于 1 的 bucket keys
+        deduper_bucket_keys: numpy.ndarray[numpy.uint64] = unique_keys[key_counts > freq].astype(numpy.uint64, copy=False)  # 仅保留通过频率筛选的 bucket keys，作为第二阶段 Deduper 的候选 key 集合
+        should_dedupe_row_mask = numpy.isin(bucket_keys, deduper_bucket_keys).any(axis=1)  # 只要一行命中任一保留的 bucket key，就进入后续 deduplication
 
         if deduper_bucket_keys.size == 0 or not should_dedupe_row_mask.any():
+            print("All bucket keys are low frequency and will be filtered out. No deduplication will be performed.")
+            return # 没有需要进行 deduplication 的 bucket keys，直接返回空迭代器
+
+        # 2. 基于计算得到的 bucket keys 进行 deduplication，统计去重结果
+        self._init_deduper(bucket_keys=deduper_bucket_keys)
+
+        if should_dedupe_row_mask.all():  # 所有样本都需要 deduplication，直接逐条处理无需额外的文件行位置映射逻辑
             for text in iter_corpus_texts(
                 corpus_files_path=corpus_files_path,
                 corpus_field_name=corpus_field_name,
                 corpus_file_format=corpus_file_format,
                 **kwargs
             ):
-                yield text, True
+                yield text, self.deduper(text)
             return
 
-        # 2. 基于计算得到的 bucket keys 进行 deduplication，统计去重结果
-        deduper = Deduper(
-            bucket_keys=deduper_bucket_keys,
-            config=DeduperConfig(
-                bands=self.config.bands,
-                rows_per_band=self.config.rows_per_band,
-                shingle_k=self.config.shingle_k,
-                shingle_step=self.config.shingle_step,
-                similarity_threshold=self.config.similarity_threshold,
-                compute_mode=self.config.compute_mode,
-                max_representatives_per_bucket=self.config.max_representatives_per_bucket,
-            )
-        )
+        file_should_dedupe_masks: dict[Path, numpy.ndarray] = {}
+        file_row_positions: dict[Path, int] = {}
+        for file_path in corpus_files_path:
+            bucket_key_chunks = file_bucket_pos_mapping.get(file_path, [])
+            if len(bucket_key_chunks) > 0:
+                file_should_dedupe_masks[file_path] = numpy.concatenate([
+                    should_dedupe_row_mask[chunk.start_position:chunk.start_position + chunk.size]
+                    for chunk in bucket_key_chunks
+                ])
+                file_row_positions[file_path] = 0  # 初始化每个文件的行位置计数器
 
-        for text in iter_corpus_texts(
+        for text, file_path in iter_corpus_texts(
             corpus_files_path=corpus_files_path,
             corpus_field_name=corpus_field_name,
             corpus_file_format=corpus_file_format,
+            return_file_path=True,
             **kwargs
         ):
-            # 是否唯一
-            not_duplicated: bool = deduper(text)
-            yield text, not_duplicated  # 生成器逐条返回文本和去重结果
+            file_mask = file_should_dedupe_masks.get(file_path, None)
+            if file_mask is None:  # 该文件没有任何需要 deduplication 的行，直接标记为唯一
+                yield text, True
+                continue
+
+            row_position = file_row_positions[file_path]
+            file_row_positions[file_path] = row_position + 1
+
+            if file_mask[row_position]: yield text, self.deduper(text)  # 是否唯一
+            else: yield text, True  # 该行没有命中任何需要 deduplication 的 bucket keys，直接标记为唯一
+
+        for file_path, file_mask in file_should_dedupe_masks.items():
+            if file_row_positions[file_path] != file_mask.size:
+                raise ValueError(
+                    f"Reader output is out of sync with computed bucket keys for file {file_path}. "
+                    f"consumed_rows={file_row_positions[file_path]}, expected_rows={file_mask.size}"
+                )
 
     def compute_bucket_keys(
         self,

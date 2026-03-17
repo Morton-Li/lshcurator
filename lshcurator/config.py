@@ -1,11 +1,14 @@
 from dataclasses import dataclass
+from multiprocessing import Event
+from queue import Queue
+from typing import Literal
 
 import numpy
 
-from .utils.types import ComputeMode
+from .utils.types import ComputeMode, WorkerReport, ShardMemorySpec, BucketWorkerCommand
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True, kw_only=True)
 class BucketConfig:
     """
     Args:
@@ -32,6 +35,8 @@ class BucketConfig:
     rows_per_band: int
     compute_mode: ComputeMode = 'char'
 
+    key_layout: Literal['flat', 'row_bands'] = 'flat'
+
 
 @dataclass(frozen=True, slots=True)
 class DeduperConfig:
@@ -47,18 +52,44 @@ class DeduperConfig:
     def num_perm(self) -> int: return self.bands * self.rows_per_band
 
 
+@dataclass(slots=True, kw_only=True)
+class WorkerConfig:
+    stop_event: Event  # 用于通知 worker 进程停止的事件，主进程设置此事件后 worker 进程应尽快完成当前任务并退出
+    report_queue: Queue[WorkerReport]  # 用于向主进程发送报告的队列，worker 进程通过此队列发送状态和结果信息
+    worker_id: int | None = None
+
+
+@dataclass(slots=True, kw_only=True)
+class BucketWorkerConfig(WorkerConfig):
+    shm_spec: ShardMemorySpec
+    command_queue: Queue[BucketWorkerCommand]
+
+
+@dataclass(slots=True, kw_only=True)
+class WorkerManagerConfig:
+    max_workers: int = 1
+
+
+@dataclass(slots=True, kw_only=True)
+class BucketWorkerManagerConfig(WorkerManagerConfig):
+    chunk_elements: int = 1_000_000  # 每次分配共享内存的元素数量
+
+    @property
+    def shm_chunk_nbytes(self) -> int: return self.chunk_elements * numpy.dtype('uint64').itemsize
+
+
 @dataclass(frozen=True, slots=True)
 class CuratorConfig:
     shingle_k: int
     shingle_step: int
     bands: int
     rows_per_band: int
-    similarity_threshold: float
     compute_mode: ComputeMode = 'char'
 
-    max_workers: int = 8
+    max_workers: int = 1
     chunk_elements: int = 1_000_000  # 每次分配共享内存的元素数量
 
+    similarity_threshold: float | None = None
     max_representatives_per_bucket: int | None = None
 
     @property

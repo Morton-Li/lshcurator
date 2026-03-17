@@ -99,8 +99,7 @@ def test_drop_identical_text_when_keys_present():
 
 def test_max_representatives_per_bucket_caps_growth(monkeypatch):
     """
-    用“每个 band 固定 key”的 encode，使所有文本都落到相同 buckets，
-    这样可以测试 reps 上限是否生效，以及 hit_count 是否随 keep 增长。
+    用“每个 band 固定 key”的 encode，使所有文本都落到相同 buckets，这样可以测试 reps 上限是否生效
     """
     def _make_encode_band_key_constant_per_band():
         """
@@ -141,7 +140,6 @@ def test_max_representatives_per_bucket_caps_growth(monkeypatch):
     # 每个 key 一个桶；每个桶 reps 最多 2 个
     assert len(d._buckets) == bands
     for st in d._buckets.values():
-        assert st.hit_count == len(texts)
         assert len(st.representatives) <= 2
 
 

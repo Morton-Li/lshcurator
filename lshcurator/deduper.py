@@ -2,7 +2,7 @@ import numpy
 
 from .algorithms import compute_minhash_signature, encode_band_key
 from .config import DeduperConfig
-from .utils.types import BucketState
+from .utils.types import HashRepresentatives
 
 
 class Deduper:
@@ -11,24 +11,35 @@ class Deduper:
         bucket_keys: numpy.ndarray,
         config: DeduperConfig,
     ):
+        """
+        Args:
+            bucket_keys (numpy.ndarray): 预先计算好的桶键列表，必须是 numpy.uint64 类型的 1D 数组，且已经排序（升序）。Deduper 将只考虑这些桶键来判断文本是否重复。
+            config (DeduperConfig): Deduper 的配置对象，包含 LSH 参数和相似度阈值等设置。
+        """
         self.config = config
         if not (0 <= self.config.similarity_threshold <= 1):
             raise ValueError(f'similarity_threshold must be in [0, 1], got {self.config.similarity_threshold}')
 
         self._bucket_keys: numpy.ndarray = bucket_keys
-        self._bucket_keys.sort()  # self._bucket_keys 的顺序影响 searchsorted 正确性，必须保证其有序且升序
-        self._buckets: dict[int, BucketState] = {}
+        self._bucket_keys.sort()
+        self._buckets: dict[int, HashRepresentatives] = {}
 
     @property
     def bucket_keys(self) -> numpy.ndarray: return self._bucket_keys
     @property
-    def buckets(self) -> dict[int, BucketState]: return self._buckets
+    def buckets(self) -> dict[int, HashRepresentatives]: return self._buckets
     @property
     def num_buckets(self) -> int: return len(self._buckets)
     @property
     def num_bucket_keys(self) -> int: return self._bucket_keys.size
 
     def __call__(self, text: str) -> bool:
+        """
+        Args:
+            text (str): 待检查的文本字符串。
+        Returns:
+            bool: 如果文本被认为是新的（不重复），返回 True；如果文本被认为是重复的，返回 False。
+        """
         hash_values = compute_minhash_signature(
             text=text,
             num_perm=self.config.num_perm,
@@ -62,11 +73,9 @@ class Deduper:
 
         # 到这里没有触发 return False，说明没有找到相似文本，可以认为是一个新的文本，接下来将其加入桶中
         for key in matched_keys:
-            st = self._buckets.get(int(key))
-            if st is None: self._buckets[int(key)] = BucketState(representatives=[hash_values], hit_count=1)
-            else:
-                st.hit_count += 1
-                if self.config.max_representatives_per_bucket is None or len(st.representatives) < self.config.max_representatives_per_bucket:
-                    st.representatives.append(hash_values)
+            hr = self._buckets.get(int(key), None)
+            if hr is None: self._buckets[int(key)] = HashRepresentatives(representatives=[hash_values])
+            elif self.config.max_representatives_per_bucket is None or len(hr.representatives) < self.config.max_representatives_per_bucket:
+                    hr.add_representative(hash_values)
 
         return True

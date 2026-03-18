@@ -77,23 +77,21 @@ class Curator:
 
     def process_corpus(
         self,
-        corpus_files_path: str | Path | list[str | Path] | None = None,
-        corpus_field_name: str | list[str] | None = None,
-        corpus_source: None = None,
-        corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
+        files_path: str | Path | list[str | Path] | None = None,
+        fields: str | list[str] | None = None,
+        iterator: None = None,
         filter_low_freq_bucket_keys: int = 1,
         **kwargs
     ) -> Iterator[tuple[str, bool]]:
         """
         处理语料的主流程接口
         Args:
-            corpus_files_path: 语料文件路径，支持单个路径或路径列表；与 corpus_source 二选一。
-            corpus_field_name: 语料文本字段名称，支持单个字段或字段列表；当 corpus_source 直接产出 str 时可省略。
-            corpus_file_format: 语料文件格式，支持 'parquet' 和 'jsonl'
+            files_path: 语料文件路径，支持单个路径或路径列表；与 corpus_source 二选一。
+            fields: 语料文本字段名称，支持单个字段或字段列表；当 corpus_source 直接产出 str 时可省略。
             filter_low_freq_bucket_keys:
                 低频 bucket key 过滤阈值，默认 1。
                 会过滤掉出现次数小于等于该阈值的 bucket keys，仅保留更高频的 bucket keys 用于后续 deduplication。
-            corpus_source:
+            iterator:
                 通用语料源，支持可重复迭代的 Iterable、一次性 Iterator。
             kwargs:
                 batch_size: 处理语料时每个批次的文本数量，仅在 corpus_file_format='parquet' 时有效，默认为 2048
@@ -103,18 +101,15 @@ class Curator:
         if self.config.similarity_threshold is None: raise ValueError("similarity_threshold must be set in config for deduplication")
         if not isinstance(filter_low_freq_bucket_keys, int) or filter_low_freq_bucket_keys < 0: raise ValueError("filter_low_freq_bucket_keys must be a non-negative integer.")
 
-        if corpus_source is not None:
-            raise NotImplementedError("corpus_source input is not yet supported in this version. Please use corpus_files_path and corpus_field_name to specify the corpus.")
-        elif corpus_files_path is not None:
-            if corpus_field_name is None: raise ValueError("corpus_field_name must be provided when corpus_files_path is given.")
-            corpus_files_path: list[Path] = path_normalize(path=corpus_files_path)
-        else: raise ValueError("corpus_files_path or corpus_source must be provided.")
+        if iterator is not None:
+            raise NotImplementedError("iterator input is not yet supported in this version. Please use files_path and fields to specify the corpus.")
+        elif files_path is not None: files_path: list[Path] = path_normalize(path=files_path)
+        else: raise ValueError("files_path or iterator must be provided.")
 
         # 1. Compute bucket keys
         bucket_keys, file_bucket_pos_mapping = self.compute_bucket_keys(
-            corpus_files_path=corpus_files_path,
-            corpus_field_name=corpus_field_name,
-            corpus_file_format=corpus_file_format,
+            files_path=files_path,
+            fields=fields,
             key_layout='row_bands',  # 计算 bucket keys 时使用 'row_bands' 布局，得到 shape=(num_samples, bands) 的二维数组，方便后续按样本处理 bucket keys
             **kwargs
         )
@@ -133,9 +128,8 @@ class Curator:
 
         if should_dedupe_row_mask.all():  # 所有样本都需要 deduplication，直接逐条处理无需额外的文件行位置映射逻辑
             for text in iter_corpus_texts(
-                corpus_files_path=corpus_files_path,
-                corpus_field_name=corpus_field_name,
-                corpus_file_format=corpus_file_format,
+                files_path=files_path,
+                fields=fields,
                 **kwargs
             ):
                 yield text, self.deduper(text)
@@ -143,7 +137,7 @@ class Curator:
 
         file_should_dedupe_masks: dict[Path, numpy.ndarray] = {}
         file_row_positions: dict[Path, int] = {}
-        for file_path in corpus_files_path:
+        for file_path in files_path:
             bucket_key_chunks = file_bucket_pos_mapping.get(file_path, [])
             if len(bucket_key_chunks) > 0:
                 file_should_dedupe_masks[file_path] = numpy.concatenate([
@@ -153,9 +147,8 @@ class Curator:
                 file_row_positions[file_path] = 0  # 初始化每个文件的行位置计数器
 
         for text, file_path in iter_corpus_texts(
-            corpus_files_path=corpus_files_path,
-            corpus_field_name=corpus_field_name,
-            corpus_file_format=corpus_file_format,
+            files_path=files_path,
+            fields=fields,
             return_file_path=True,
             **kwargs
         ):
@@ -179,17 +172,15 @@ class Curator:
 
     def compute_bucket_keys(
         self,
-        corpus_files_path: str | Path | list[str | Path],
-        corpus_field_name: str | list[str],
-        corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
+        files_path: str | Path | list[str | Path],
+        fields: str | list[str] | None = None,
         **kwargs
     ) -> tuple[numpy.ndarray[numpy.uint64], dict[Path, list[BucketKeyChunk]]]:
         """
         计算 bucket keys
         Args:
-            corpus_files_path (str | Path | list[str | Path]): 语料文件路径，支持单个路径或路径列表
-            corpus_field_name (str | list[str]): 语料文本字段名称，支持单个字段或字段列表
-            corpus_file_format (Literal['parquet', 'jsonl']): 语料文件格式，支持 'parquet' 和 'jsonl'
+            files_path (str | Path | list[str | Path]): 语料文件路径，支持单个路径或路径列表
+            fields (str | list[str] | None): 语料文本字段名称，支持单个字段或字段列表；None 代表所有字段。
             kwargs:
                 batch_size: 处理语料时每个批次的文本数量，仅在 corpus_file_format='parquet' 时有效，默认为 2048
                 key_layout:
@@ -218,8 +209,7 @@ class Curator:
             )
         )
         return bucket_worker_manager.run(
-            corpus_files_path=corpus_files_path,
-            corpus_field_name=corpus_field_name,
-            corpus_file_format=corpus_file_format,
+            files_path=files_path,
+            fields=fields,
             **kwargs
         ), bucket_worker_manager.file_bucket_pos_mapping

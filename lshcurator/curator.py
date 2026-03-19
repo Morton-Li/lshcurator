@@ -48,20 +48,45 @@ class Curator:
         )
         return self.deduper
 
+    @staticmethod
+    def _select_deduper_bucket_keys(
+        bucket_keys: numpy.ndarray[numpy.uint64],
+        filter_freq: int = 1,
+        sorted: bool = True,
+    ) -> tuple[numpy.ndarray[numpy.uint64], numpy.ndarray[numpy.bool]]:
+        """
+        根据 bucket key 频率过滤掉低频 bucket keys，仅保留更高频的 bucket keys 用于后续 deduplication。
+        Args:
+            bucket_keys: 形状为 (num_samples, bands) ,每行对应一个样本的所有 band keys 的二维数组。
+            filter_freq: 频率阈值，默认为 1，表示过滤掉所有出现次数小于等于该阈值的 bucket keys。必须为非负整数。
+            sorted: 是否对保留的 bucket keys 进行升序排序，默认为 True。
+        Returns:
+            deduper_bucket_keys: 经过频率过滤后用于 deduplication 的 bucket keys集合，形状为 (num_deduper_keys,) 的一维数组。
+            should_dedupe_row_mask: 形状为 (num_samples,) 的布尔数组，表示每行是否命中任一保留的 bucket key，True 表示该行需要进入后续 deduplication，False 表示该行不需要 deduplication。
+        """
+        if bucket_keys.ndim != 2: raise ValueError(f'Expected bucket_keys to be a 2D array with shape (num_samples, bands), but got shape {bucket_keys.shape}.')
+        num_samples, bands = bucket_keys.shape
+        if num_samples == 0: return numpy.empty(0, dtype=numpy.uint64), numpy.empty(0, dtype=numpy.bool)
+        if filter_freq < 0: raise ValueError(f"filter_freq must be a non-negative integer, but got {filter_freq}.")
+
+        unique_keys, inverse, key_counts = numpy.unique(bucket_keys, return_inverse=True, return_counts=True, sorted=sorted)
+        keep_unique_mask = key_counts > filter_freq  # 标记需要保留的 bucket keys
+        deduper_bucket_keys: numpy.ndarray[numpy.uint64] = unique_keys[keep_unique_mask].astype(numpy.uint64, copy=False)  # 仅保留通过频率筛选的 bucket keys，作为第二阶段 Deduper 的候选 key 集合
+        should_dedupe_row_mask = keep_unique_mask[inverse].reshape(bucket_keys.shape).any(axis=-1)  # 只要一行命中任一保留的 bucket key，就进入后续 deduplication
+        return deduper_bucket_keys, should_dedupe_row_mask
+
     def process_corpus(
         self,
-        corpus_files_path: str | Path | list[str | Path],
-        corpus_field_name: str | list[str],
-        corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
+        files_path: str | Path | list[str | Path],
+        fields: str | list[str] | None = None,
         filter_low_freq_bucket_keys: int = 1,
         **kwargs
     ) -> Iterator[tuple[str, bool]]:
         """
         处理语料的主流程接口
         Args:
-            corpus_files_path: 语料文件路径，支持单个路径或路径列表
-            corpus_field_name: 语料文本字段名称，支持单个字段或字段列表
-            corpus_file_format: 语料文件格式，支持 'parquet' 和 'jsonl'
+            files_path: 语料文件路径，支持单个路径或路径列表。
+            fields: 语料文本字段名称，支持单个字段或字段列表；当 corpus_source 直接产出 str 时可省略。
             filter_low_freq_bucket_keys:
                 低频 bucket key 过滤阈值，默认 1。
                 会过滤掉出现次数小于等于该阈值的 bucket keys，仅保留更高频的 bucket keys 用于后续 deduplication。
@@ -73,29 +98,20 @@ class Curator:
         if self.config.similarity_threshold is None: raise ValueError("similarity_threshold must be set in config for deduplication")
         if not isinstance(filter_low_freq_bucket_keys, int) or filter_low_freq_bucket_keys < 0: raise ValueError("filter_low_freq_bucket_keys must be a non-negative integer.")
 
-        corpus_files_path: list[Path] = path_normalize(path=corpus_files_path)
+        files_path: list[Path] = path_normalize(path=files_path)
 
         # 1. Compute bucket keys
         bucket_keys, file_bucket_pos_mapping = self.compute_bucket_keys(
-            corpus_files_path=corpus_files_path,
-            corpus_field_name=corpus_field_name,
-            corpus_file_format=corpus_file_format,
+            files_path=files_path,
+            fields=fields,
             key_layout='row_bands',  # 计算 bucket keys 时使用 'row_bands' 布局，得到 shape=(num_samples, bands) 的二维数组，方便后续按样本处理 bucket keys
             **kwargs
         )
 
-        if bucket_keys.ndim != 2:
-            raise ValueError(f"Expected bucket_keys to be a 2D array with shape (num_samples, bands), but got shape {bucket_keys.shape}. Ensure that compute_bucket_keys is called with key_layout='row_bands'.")
-        n_row, n_bands = bucket_keys.shape
-        if n_row == 0:
-            print("No bucket keys were computed.")
-            return # 没有 bucket keys，直接返回空迭代器
-        print(f"Total bucket keys computed: {n_row * n_bands}")
-
-        unique_keys, key_counts = numpy.unique(bucket_keys, return_counts=True)
-        freq: int = max(1, filter_low_freq_bucket_keys)  # 频率阈值，默认为 1，表示过滤掉所有出现次数小于等于 1 的 bucket keys
-        deduper_bucket_keys: numpy.ndarray[numpy.uint64] = unique_keys[key_counts > freq].astype(numpy.uint64, copy=False)  # 仅保留通过频率筛选的 bucket keys，作为第二阶段 Deduper 的候选 key 集合
-        should_dedupe_row_mask = numpy.isin(bucket_keys, deduper_bucket_keys).any(axis=1)  # 只要一行命中任一保留的 bucket key，就进入后续 deduplication
+        deduper_bucket_keys, should_dedupe_row_mask = self._select_deduper_bucket_keys(
+            bucket_keys=bucket_keys,
+            filter_freq=filter_low_freq_bucket_keys,
+        )
 
         if deduper_bucket_keys.size == 0 or not should_dedupe_row_mask.any():
             print("All bucket keys are low frequency and will be filtered out. No deduplication will be performed.")
@@ -106,9 +122,8 @@ class Curator:
 
         if should_dedupe_row_mask.all():  # 所有样本都需要 deduplication，直接逐条处理无需额外的文件行位置映射逻辑
             for text in iter_corpus_texts(
-                corpus_files_path=corpus_files_path,
-                corpus_field_name=corpus_field_name,
-                corpus_file_format=corpus_file_format,
+                files_path=files_path,
+                fields=fields,
                 **kwargs
             ):
                 yield text, self.deduper(text)
@@ -116,7 +131,7 @@ class Curator:
 
         file_should_dedupe_masks: dict[Path, numpy.ndarray] = {}
         file_row_positions: dict[Path, int] = {}
-        for file_path in corpus_files_path:
+        for file_path in files_path:
             bucket_key_chunks = file_bucket_pos_mapping.get(file_path, [])
             if len(bucket_key_chunks) > 0:
                 file_should_dedupe_masks[file_path] = numpy.concatenate([
@@ -126,9 +141,8 @@ class Curator:
                 file_row_positions[file_path] = 0  # 初始化每个文件的行位置计数器
 
         for text, file_path in iter_corpus_texts(
-            corpus_files_path=corpus_files_path,
-            corpus_field_name=corpus_field_name,
-            corpus_file_format=corpus_file_format,
+            files_path=files_path,
+            fields=fields,
             return_file_path=True,
             **kwargs
         ):
@@ -152,17 +166,15 @@ class Curator:
 
     def compute_bucket_keys(
         self,
-        corpus_files_path: str | Path | list[str | Path],
-        corpus_field_name: str | list[str],
-        corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
+        files_path: str | Path | list[str | Path],
+        fields: str | list[str] | None = None,
         **kwargs
     ) -> tuple[numpy.ndarray[numpy.uint64], dict[Path, list[BucketKeyChunk]]]:
         """
         计算 bucket keys
         Args:
-            corpus_files_path (str | Path | list[str | Path]): 语料文件路径，支持单个路径或路径列表
-            corpus_field_name (str | list[str]): 语料文本字段名称，支持单个字段或字段列表
-            corpus_file_format (Literal['parquet', 'jsonl']): 语料文件格式，支持 'parquet' 和 'jsonl'
+            files_path (str | Path | list[str | Path]): 语料文件路径，支持单个路径或路径列表
+            fields (str | list[str] | None): 语料文本字段名称，支持单个字段或字段列表；None 代表所有字段。
             kwargs:
                 batch_size: 处理语料时每个批次的文本数量，仅在 corpus_file_format='parquet' 时有效，默认为 2048
                 key_layout:
@@ -191,8 +203,7 @@ class Curator:
             )
         )
         return bucket_worker_manager.run(
-            corpus_files_path=corpus_files_path,
-            corpus_field_name=corpus_field_name,
-            corpus_file_format=corpus_file_format,
+            files_path=files_path,
+            fields=fields,
             **kwargs
         ), bucket_worker_manager.file_bucket_pos_mapping

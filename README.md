@@ -177,9 +177,8 @@ curator = Curator(CuratorConfig(
 ))
 
 for text, keep in curator.process_corpus(
-    corpus_files_path=["./data/a.jsonl", "./data/b.jsonl"],
-    corpus_field_name="text",
-    corpus_file_format='jsonl',
+    files_path=["./data/a.jsonl", "./data/b.jsonl"],
+    fields="text",
     filter_low_freq_bucket_keys=1,
 ):
     if keep:
@@ -232,9 +231,8 @@ config = CuratorConfig(
 curator = Curator(config)
 
 results = curator.process_corpus(
-    corpus_files_path="./corpus.jsonl",
-    corpus_field_name="text",
-    corpus_file_format='jsonl',
+    files_path="./corpus.jsonl",
+    fields="text",
     filter_low_freq_bucket_keys=1,
 )
 
@@ -248,9 +246,8 @@ for text, keep in results:
 
 ```python
 results = curator.process_corpus(
-    corpus_files_path="./corpus.jsonl",
-    corpus_field_name=["title", "content"],
-    corpus_file_format='jsonl',
+    files_path="./corpus.jsonl",
+    fields=["title", "content"],
 )
 ```
 
@@ -274,9 +271,8 @@ pip install -e ".[pd]"
 
 ```python
 results = curator.process_corpus(
-    corpus_files_path=["./data/part-0001.parquet", "./data/part-0002.parquet"],
-    corpus_field_name="text",
-    corpus_file_format='parquet',
+    files_path=["./data/part-0001.parquet", "./data/part-0002.parquet"],
+    fields="text",
     batch_size=4096,
     filter_low_freq_bucket_keys=1,
 )
@@ -302,9 +298,8 @@ for text, keep in results:
 
 `process_corpus(...)` 中常用参数：
 
-- `corpus_files_path`：单文件路径或路径列表；
-- `corpus_field_name`：字段名或字段名列表；
-- `corpus_file_format`：`'jsonl'` 或 `'parquet'`；
+- `files_path`：单文件路径或路径列表；
+- `fields`：字段名或字段名列表；
 - `filter_low_freq_bucket_keys`：低频 key 过滤阈值。
 
 ---
@@ -325,9 +320,8 @@ curator = Curator(CuratorConfig(
 ))
 
 bucket_keys, file_mapping = curator.compute_bucket_keys(
-    corpus_files_path=["./data/a.jsonl", "./data/b.jsonl"],
-    corpus_field_name="text",
-    corpus_file_format='jsonl',
+    files_path=["./data/a.jsonl", "./data/b.jsonl"],
+    fields="text",
     key_layout='row_bands',
 )
 

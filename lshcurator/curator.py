@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Literal, Iterator, cast, Iterable
+from typing import Literal, Iterator, cast
 
 import numpy
 
@@ -77,8 +77,7 @@ class Curator:
 
     def process_corpus(
         self,
-        files_path: str | Path | list[str | Path] | None = None,
-        iterable: Iterable | None = None,
+        files_path: str | Path | list[str | Path],
         fields: str | list[str] | None = None,
         filter_low_freq_bucket_keys: int = 1,
         **kwargs
@@ -87,7 +86,6 @@ class Curator:
         处理语料的主流程接口
         Args:
             files_path: 语料文件路径，支持单个路径或路径列表。
-            iterable: 通用语料源，支持可重复迭代的 Iterable。
             fields: 语料文本字段名称，支持单个字段或字段列表；当 corpus_source 直接产出 str 时可省略。
             filter_low_freq_bucket_keys:
                 低频 bucket key 过滤阈值，默认 1。
@@ -100,11 +98,7 @@ class Curator:
         if self.config.similarity_threshold is None: raise ValueError("similarity_threshold must be set in config for deduplication")
         if not isinstance(filter_low_freq_bucket_keys, int) or filter_low_freq_bucket_keys < 0: raise ValueError("filter_low_freq_bucket_keys must be a non-negative integer.")
 
-        if iterable is not None:
-            if not isinstance(iterable, Iterable): raise ValueError("iterable is not an iterable.")
-            raise NotImplementedError("iterable input is not yet supported in this version. Please use files_path and fields to specify the corpus.")
-        elif files_path is not None: files_path: list[Path] = path_normalize(path=files_path)
-        else: raise ValueError("files_path or iterable must be provided.")
+        files_path: list[Path] = path_normalize(path=files_path)
 
         # 1. Compute bucket keys
         bucket_keys, file_bucket_pos_mapping = self.compute_bucket_keys(

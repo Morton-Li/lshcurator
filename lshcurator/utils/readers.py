@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Iterator, Literal
+from typing import Iterator
 
 import numpy
 
@@ -31,22 +31,20 @@ def iter_jsonl_rows(file_path: Path) -> Iterator[dict]:
 
 
 def iter_corpus_texts(
-    corpus_files_path: str | Path | list[str | Path],
-    corpus_field_name: str | list[str],
-    corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
+    files_path: str | Path | list[str | Path],
+    fields: str | list[str] | None = None,
     **kwargs
 ) -> Iterator[str | tuple[str, Path]]:
     """
     流式迭代语料文本内容，支持多文件、多字段，以及可选返回来源文件路径。
 
     Args:
-        corpus_files_path (str | Path | list[str | Path]):
+        files_path (str | Path | list[str | Path]):
             语料文件路径，支持单个路径或路径列表；内部会统一规范化为 ``list[Path]`` 并按给定顺序迭代。
-        corpus_field_name (str | list[str]):
+        fields (str | list[str] | None):
             需要提取的文本字段名，支持单个字段或字段列表。
             当传入多个字段时，会按文件内原始顺序依次展开各字段文本，而不是拼接为一条样本。
-        corpus_file_format (Literal['parquet', 'jsonl']):
-            输入语料格式，当前支持 ``'parquet'`` 和 ``'jsonl'``。
+            当传入 None 时代表提取所有字段文本，适用于纯文本文件或需要全字段内容的场景。
         **kwargs:
             batch_size (int):
                 仅对 ``parquet`` 生效，每次读取的批大小，默认 ``2048``。
@@ -64,25 +62,26 @@ def iter_corpus_texts(
         - ``jsonl`` 路径下会对字段值执行 ``strip()``，空结果会被跳过；
         - 若 ``corpus_file_format`` 不受支持，将抛出 ``ValueError``。
     """
-    if isinstance(corpus_field_name, str): corpus_field_name = [corpus_field_name]
-    corpus_files_path: list[Path] = path_normalize(path=corpus_files_path)
+    if isinstance(fields, str): fields = [fields]
+    files_path: list[Path] = path_normalize(path=files_path)
     batch_size = kwargs.pop('batch_size', 2048)
     return_file_path = kwargs.pop('return_file_path', False)
 
-    if corpus_file_format == 'parquet':
-        for file_path in corpus_files_path:
+    for file_path in files_path:
+        file_format = file_path.suffix.lstrip('.').lower()
+        if file_format == 'parquet':
             for batch in iter_parquet_batches(
                 parquet_path=file_path,
                 batch_size=batch_size,
-                text_field=corpus_field_name,
+                text_field=fields,
             ):
                 for sample in batch.stack().replace(r'^\s*$', numpy.nan, regex=True).dropna().reset_index(drop=True):
                     yield (str(sample), file_path) if return_file_path else str(sample)
-    elif corpus_file_format == 'jsonl':
-        for file_path in corpus_files_path:
+        elif file_format == 'jsonl':
             for row in iter_jsonl_rows(file_path=file_path):
-                for field in corpus_field_name:
+                fields = fields or row.keys()
+                for field in fields:
                     content = row.get(field, '').strip()
                     if not content: continue
                     yield (str(content), file_path) if return_file_path else str(content)
-    else: raise ValueError(f"Unsupported file format: {corpus_file_format}")
+        else: raise ValueError(f"Unsupported file format: {file_format}")

@@ -16,7 +16,7 @@ from multiprocessing import shared_memory
 from pathlib import Path
 from queue import Empty, Queue
 from time import sleep
-from typing import Literal, Callable
+from typing import Callable
 
 import numpy
 
@@ -128,23 +128,20 @@ class BucketWorker(WorkerBase, BucketBase):
     def job(
         self,
         file_path: Path,
-        field_name: str | list[str],
-        file_format: Literal['parquet', 'jsonl'] = 'parquet',
+        fields: str | list[str] | None = None,
         **kwargs
     ):
         """
         批量插入文本并在完成后向上游报告状态
         Args:
             file_path: 输入文件路径，支持单个文件路径
-            field_name: 需要处理的文本字段名称，支持单个字段或字段列表
-            file_format: 输入文件格式，支持 'parquet' 和 'jsonl'
+            fields: 需要处理的文本字段名称，支持单个字段或字段列表
             kwargs:
                 batch_size: 仅对 parquet 有效，指定批处理大小以控制内存使用，默认为 2048
         """
         for text in iter_corpus_texts(
-            corpus_files_path=file_path,
-            corpus_field_name=field_name,
-            corpus_file_format=file_format,
+            files_path=file_path,
+            fields=fields,
             **kwargs
         ):
             while self.paused: sleep(1)
@@ -260,18 +257,17 @@ class BucketWorkerManager(WorkerManagerBase):
 
     def run(
         self,
-        corpus_files_path: str | Path | list[str | Path],
-        corpus_field_name: str | list[str],
-        corpus_file_format: Literal['parquet', 'jsonl'] = 'parquet',
+        files_path: str | Path | list[str | Path],
+        fields: str | list[str] | None = None,
         **kwargs
     ) -> numpy.ndarray[numpy.uint64]:
-        corpus_files_path: list[Path] = path_normalize(path=corpus_files_path)
+        files_path: list[Path] = path_normalize(path=files_path)
 
         self.bucket_keys.clear()  # 清空全局 bucket keys 数组
         self.worker_info.clear()
         self._written = 0
 
-        for file_path in corpus_files_path:
+        for file_path in files_path:
             worker_id = self.add_subprocess(
                 worker_cls=BucketWorker,
                 worker_init_kwargs={
@@ -279,8 +275,7 @@ class BucketWorkerManager(WorkerManagerBase):
                 },
                 job_kwargs={
                     'file_path': file_path,
-                    'field_name': corpus_field_name,
-                    'file_format': corpus_file_format,
+                    'fields': fields,
                     **kwargs
                 },
             )
@@ -288,7 +283,7 @@ class BucketWorkerManager(WorkerManagerBase):
             self.worker_info[worker_id] = {
                 'file': {
                     'path': file_path,
-                    'format': corpus_file_format,
+                    'format': file_path.suffix.lstrip('.').lower(),  # 从文件扩展名推断格式，去掉点并转换为小写
                     'name': file_path.name,
                 },
                 'chunks': [],  # dict[str, int]: start_position 和 size，用于记录该 worker 处理的 bucket keys 在全局 bucket keys 数组中的位置和大小

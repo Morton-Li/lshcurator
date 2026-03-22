@@ -25,7 +25,7 @@ dependencies = [
 "Repository" = "https://github.com/Morton-Li/lshcurator"
 
 [project.optional-dependencies]
-dev = []
+dev = ["pytest~=9.0.2"]
 pd = ["pandas~=3.0.1", "pyarrow~=23.0.1"]
 
 [tool.hatch.build.targets.wheel]

@@ -81,11 +81,12 @@ class BucketWorker(WorkerBase, BucketBase):
         while self.paused: sleep(1)  # 阻塞等待上游处理完成后状态变为 ready 或接到 Exit
         self._keys_written = 0
 
-    def append_keys(self, keys: numpy.ndarray[numpy.uint64]) -> None:
+    def append_keys(self, keys: numpy.typing.NDArray[numpy.uint64]) -> None:
         while self.paused: sleep(1)  # 等待状态变为 ready
         if self.stop_event.is_set(): return  # 收到停止事件，退出方法
 
-        if not isinstance(keys, numpy.ndarray): raise ValueError("Keys must be a numpy array")
+        if not isinstance(keys, numpy.ndarray): raise ValueError(f"Keys must be a numpy array of dtype numpy.uint64, but got {type(keys)}")
+        if keys.dtype != numpy.uint64: raise ValueError(f"Keys dtype must be numpy.uint64, but got {keys.dtype}")
         keys_len = len(keys)
         if self._bucket_config.key_layout == 'row_bands':
             if self._keys_written % self._bucket_config.bands != 0: raise ValueError("Bands must be positive for row_bands layout")
@@ -260,7 +261,7 @@ class BucketWorkerManager(WorkerManagerBase):
         files_path: str | Path | list[str | Path],
         fields: str | list[str] | None = None,
         **kwargs
-    ) -> numpy.ndarray[numpy.uint64]:
+    ) -> numpy.typing.NDArray[numpy.uint64]:
         files_path: list[Path] = path_normalize(path=files_path)
 
         self.bucket_keys.clear()  # 清空全局 bucket keys 数组

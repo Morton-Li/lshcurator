@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from pathlib import Path
-from typing import Literal, Iterator, cast
+from typing import Iterator
 
 import numpy
 
@@ -30,7 +30,7 @@ class Curator:
 
         self.deduper: Deduper
 
-    def init_deduper(self, bucket_keys: numpy.ndarray[numpy.uint64]) -> Deduper:
+    def init_deduper(self, bucket_keys: numpy.typing.NDArray[numpy.uint64]) -> Deduper:
         if bucket_keys.ndim == 2: bucket_keys = bucket_keys.reshape(-1)  # 展平为一维数组，包含所有 band keys
         elif bucket_keys.ndim != 1: raise ValueError(f"Expected bucket_keys to be either a 1D array with shape (num_keys,) or a 2D array with shape (num_samples, bands), but got shape {bucket_keys.shape}.")
 
@@ -49,17 +49,15 @@ class Curator:
         return self.deduper
 
     @staticmethod
-    def _select_deduper_bucket_keys(
-        bucket_keys: numpy.ndarray[numpy.uint64],
+    def select_deduper_bucket_keys(
+        bucket_keys: numpy.typing.NDArray[numpy.uint64],
         filter_freq: int = 1,
-        sorted: bool = True,
-    ) -> tuple[numpy.ndarray[numpy.uint64], numpy.ndarray[numpy.bool]]:
+    ) -> tuple[numpy.typing.NDArray[numpy.uint64], numpy.typing.NDArray[numpy.bool_]]:
         """
         根据 bucket key 频率过滤掉低频 bucket keys，仅保留更高频的 bucket keys 用于后续 deduplication。
         Args:
             bucket_keys: 形状为 (num_samples, bands) ,每行对应一个样本的所有 band keys 的二维数组。
             filter_freq: 频率阈值，默认为 1，表示过滤掉所有出现次数小于等于该阈值的 bucket keys。必须为非负整数。
-            sorted: 是否对保留的 bucket keys 进行升序排序，默认为 True。
         Returns:
             deduper_bucket_keys: 经过频率过滤后用于 deduplication 的 bucket keys集合，形状为 (num_deduper_keys,) 的一维数组。
             should_dedupe_row_mask: 形状为 (num_samples,) 的布尔数组，表示每行是否命中任一保留的 bucket key，True 表示该行需要进入后续 deduplication，False 表示该行不需要 deduplication。
@@ -69,9 +67,9 @@ class Curator:
         if num_samples == 0: return numpy.empty(0, dtype=numpy.uint64), numpy.empty(0, dtype=numpy.bool)
         if filter_freq < 0: raise ValueError(f"filter_freq must be a non-negative integer, but got {filter_freq}.")
 
-        unique_keys, inverse, key_counts = numpy.unique(bucket_keys, return_inverse=True, return_counts=True, sorted=sorted)
+        unique_keys, inverse, key_counts = numpy.unique(bucket_keys, return_inverse=True, return_counts=True)
         keep_unique_mask = key_counts > filter_freq  # 标记需要保留的 bucket keys
-        deduper_bucket_keys: numpy.ndarray[numpy.uint64] = unique_keys[keep_unique_mask].astype(numpy.uint64, copy=False)  # 仅保留通过频率筛选的 bucket keys，作为第二阶段 Deduper 的候选 key 集合
+        deduper_bucket_keys: numpy.typing.NDArray[numpy.uint64] = unique_keys[keep_unique_mask].astype(numpy.uint64, copy=False)  # 仅保留通过频率筛选的 bucket keys，作为第二阶段 Deduper 的候选 key 集合
         should_dedupe_row_mask = keep_unique_mask[inverse].reshape(bucket_keys.shape).any(axis=-1)  # 只要一行命中任一保留的 bucket key，就进入后续 deduplication
         return deduper_bucket_keys, should_dedupe_row_mask
 
@@ -108,7 +106,7 @@ class Curator:
             **kwargs
         )
 
-        deduper_bucket_keys, should_dedupe_row_mask = self._select_deduper_bucket_keys(
+        deduper_bucket_keys, should_dedupe_row_mask = self.select_deduper_bucket_keys(
             bucket_keys=bucket_keys,
             filter_freq=filter_low_freq_bucket_keys,
         )
@@ -169,7 +167,7 @@ class Curator:
         files_path: str | Path | list[str | Path],
         fields: str | list[str] | None = None,
         **kwargs
-    ) -> tuple[numpy.ndarray[numpy.uint64], dict[Path, list[BucketKeyChunk]]]:
+    ) -> tuple[numpy.typing.NDArray[numpy.uint64], dict[Path, list[BucketKeyChunk]]]:
         """
         计算 bucket keys
         Args:
@@ -195,7 +193,7 @@ class Curator:
                 bands=self.config.bands,
                 rows_per_band=self.config.rows_per_band,
                 compute_mode=self.config.compute_mode,
-                key_layout=cast(Literal['flat', 'row_bands'], key_layout)
+                key_layout=key_layout
             ),
             bucket_worker_manager_config=BucketWorkerManagerConfig(
                 max_workers=self.config.max_workers,

@@ -74,6 +74,26 @@ def _patch_init_deduper(monkeypatch: pytest.MonkeyPatch, results: list[bool]):
 	return state
 
 
+def _select_deduper_bucket_keys_with_inverse(
+	bucket_keys: numpy.ndarray,
+	filter_freq: int = 1,
+) -> tuple[numpy.ndarray, numpy.ndarray]:
+	"""
+	Curator.select_deduper_bucket_keys 基于 inverse 的实现逻辑，使用 numpy.unique 的 return_inverse 和 return_counts 来模拟选取 deduper bucket keys 和生成 should_dedupe_row_mask 的过程，以便在测试中验证 Curator.select_deduper_bucket_keys 的行为是否与之前的实现保持一致。
+	注：
+	    inverse 是一个与 bucket_keys 形状相同的数组，其中每个元素的值是对应 bucket key 在 unique_keys 中的索引位置。通过 return_counts 可以得到每个 unique key 的出现频率，从而根据 filter_freq 来决定哪些 unique keys 应该被保留作为 deduper bucket keys。最后，通过 inverse 数组和 keep_unique_mask 来生成 should_dedupe_row_mask，标记哪些行应该进入后续的 deduplication 过程。
+	    所以使用 numpy.unique 构造 inverse 先编号再回填本身并没有错，只不过会导致额外内存开销，新的 Curator.select_deduper_bucket_keys 实现可在 64bit 系统下将 inverse 的 dtype 从 int64 的 8 bytes 降到 bool_ 的近似 1 bytes, 且 inverse 方案中间的布尔展开还需要占用额外的近似 1 bytes
+	    从“大规模元素数 N 的角度”看 with_inverse 版本最大负担就是 inverse (8 bytes)，并附带 keep_unique_mask (1 bytes)，
+	    新版本直接查成员关系则只需要维护 keep_unique_mask (1 bytes)，
+	    所以整体下来新版本实现理想情况应降低 88.9% 的内存开销
+	"""
+	unique_keys, inverse, key_counts = numpy.unique(bucket_keys, return_inverse=True, return_counts=True)
+	keep_unique_mask = key_counts > filter_freq  # 标记需要保留的 bucket keys
+	deduper_bucket_keys: numpy.typing.NDArray[numpy.uint64] = unique_keys[keep_unique_mask].astype(numpy.uint64, copy=False)  # 仅保留通过频率筛选的 bucket keys，作为第二阶段 Deduper 的候选 key 集合
+	should_dedupe_row_mask = keep_unique_mask[inverse].reshape(bucket_keys.shape).any(axis=-1)  # 只要一行命中任一保留的 bucket key，就进入后续 deduplication
+	return deduper_bucket_keys, should_dedupe_row_mask
+
+
 def test_init_deduper_flattens_row_band_keys(monkeypatch: pytest.MonkeyPatch):
 	curator = _make_curator()
 	captured: dict[str, object] = {}
@@ -162,6 +182,26 @@ def test_process_corpus_returns_empty_iterator_when_no_selected_bucket_keys(monk
 
 	assert list(curator.process_corpus(file_path, 'text')) == []
 	assert iter_calls == []
+
+
+@pytest.mark.parametrize(
+	('bucket_keys', 'filter_freq'),
+	[
+		(numpy.array([[11, 12], [11, 13], [21, 22]], dtype=numpy.uint64), 0),
+		(numpy.array([[101, 201], [301, 201], [401, 501], [601, 701]], dtype=numpy.uint64), 1),
+		(numpy.array([[5, 6], [7, 8]], dtype=numpy.uint64), 1),
+	],
+)
+def test_select_deduper_bucket_keys_matches_previous_return_inverse_behavior(bucket_keys: numpy.ndarray, filter_freq: int):
+	curator = _make_curator()
+
+	expected_keys, expected_mask = _select_deduper_bucket_keys_with_inverse(bucket_keys, filter_freq)
+	actual_keys, actual_mask = curator.select_deduper_bucket_keys(bucket_keys, filter_freq)
+
+	assert actual_keys.dtype == numpy.uint64
+	assert actual_mask.dtype == numpy.bool_
+	assert numpy.array_equal(actual_keys, expected_keys)
+	assert numpy.array_equal(actual_mask, expected_mask)
 
 
 def test_process_corpus_filter_zero_routes_all_rows_with_current_selection_rule(monkeypatch: pytest.MonkeyPatch):

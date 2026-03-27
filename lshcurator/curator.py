@@ -64,13 +64,13 @@ class Curator:
         """
         if bucket_keys.ndim != 2: raise ValueError(f'Expected bucket_keys to be a 2D array with shape (num_samples, bands), but got shape {bucket_keys.shape}.')
         num_samples, bands = bucket_keys.shape
-        if num_samples == 0: return numpy.empty(0, dtype=numpy.uint64), numpy.empty(0, dtype=numpy.bool)
+        if num_samples == 0: return numpy.empty(0, dtype=numpy.uint64), numpy.empty(0, dtype=numpy.bool_)
         if filter_freq < 0: raise ValueError(f"filter_freq must be a non-negative integer, but got {filter_freq}.")
 
-        unique_keys, inverse, key_counts = numpy.unique(bucket_keys, return_inverse=True, return_counts=True)
+        unique_keys, key_counts = numpy.unique(bucket_keys, return_counts=True)
         keep_unique_mask = key_counts > filter_freq  # 标记需要保留的 bucket keys
         deduper_bucket_keys: numpy.typing.NDArray[numpy.uint64] = unique_keys[keep_unique_mask].astype(numpy.uint64, copy=False)  # 仅保留通过频率筛选的 bucket keys，作为第二阶段 Deduper 的候选 key 集合
-        should_dedupe_row_mask = keep_unique_mask[inverse].reshape(bucket_keys.shape).any(axis=-1)  # 只要一行命中任一保留的 bucket key，就进入后续 deduplication
+        should_dedupe_row_mask = numpy.isin(bucket_keys, deduper_bucket_keys).any(axis=-1)  # 只要一行命中任一保留的 bucket key，就进入后续 deduplication
         return deduper_bucket_keys, should_dedupe_row_mask
 
     def process_corpus(

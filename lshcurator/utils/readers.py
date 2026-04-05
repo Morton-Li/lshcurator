@@ -1,13 +1,17 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, TYPE_CHECKING
 
 import numpy
+if TYPE_CHECKING:
+    import pandas
 
 from .normalizations import path_normalize
 
 
-def iter_parquet_batches(parquet_path: Path | str, batch_size: int, text_field: str | list[str] | None = None) -> Iterator['pandas.DataFrame']:
+def iter_parquet_batches(parquet_path: Path | str, batch_size: int, text_field: str | list[str] | None = None) -> Iterator[pandas.DataFrame]:
     """Stream batches of data from a parquet file."""
     if isinstance(parquet_path, str): parquet_path = Path(parquet_path)
     if isinstance(text_field, str): text_field = [text_field]
@@ -18,6 +22,7 @@ def iter_parquet_batches(parquet_path: Path | str, batch_size: int, text_field: 
     except ImportError:
         raise ImportError('pandas and pyarrow are required for streaming parquet files. Please install them via `pip install pandas pyarrow`.')
 
+    # ParquetFile 在表现上不如 dataset 一致，因此即便单文件场景也选择 dataset
     dataset_obj = dataset.dataset(source=parquet_path, format='parquet')
     for batch in dataset_obj.to_batches(columns=text_field, batch_size=batch_size):
         yield batch.to_pandas()

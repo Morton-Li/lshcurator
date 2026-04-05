@@ -189,7 +189,7 @@ for text, keep in curator.process_corpus(
 
 - `keep=True` 表示该文本被认为应保留；
 - `keep=False` 表示该文本被认为是重复样本，应丢弃；
-- `filter_low_freq_bucket_keys=1` 表示过滤掉出现次数小于等于 1 的 key，也就是默认过滤 singleton key。
+- `filter_low_freq_bucket_keys=1` 表示过滤掉出现次数小于等于 1 的 key，也就是默认过滤 singleton key；若设置为 `0` （除非你知道这意味着什么），则不会过滤任何已出现的 key。
 
 ---
 
@@ -424,9 +424,14 @@ key_layout='row_bands'
 
 当前实现中，如果阶段 1 之后没有任何 key 通过筛选，`process_corpus(...)` 会直接返回**空迭代器**，因为此时没有任何样本需要被处理。
 
-### 3. `filter_low_freq_bucket_keys=0` 与 `1` 当前等价
+### 3. `filter_low_freq_bucket_keys=0` 不等同于 `1`
 
-当 filter_low_freq_bucket_keys 设置为 `0` 时从数学上完全没意义，且等同于本项目退化到传统实现，不仅不会提升性能，反而会增加不必要的开销。
+当前实现中，保留规则是“只保留出现次数 `>` 阈值的 key”。因此：
+
+- `filter_low_freq_bucket_keys=1`：会过滤掉 singleton key；
+- `filter_low_freq_bucket_keys=0`：会保留所有至少出现过一次的 key。
+
+这意味着当阈值设为 `0` 时，所有样本行都会进入第二阶段 deduplication，对于已经明确了唯一性的 singleton key 来说完全没有意义，也会失去当前两阶段筛选带来的性能收益。
 
 ### 4. `Deduper.__call__` 的返回值语义
 

@@ -25,7 +25,10 @@ from ..bucket import BucketBase
 from ..config import BucketConfig, BucketWorkerManagerConfig, BucketWorkerConfig
 from ..utils.normalizations import path_normalize
 from ..utils.readers import iter_corpus_texts
-from ..utils.types import ShardMemorySpec, BucketWorkerReport, BucketWorkerCommand, BucketWorkerSlot, BucketKeyChunk
+from ..utils.types import (
+    ShardMemorySpec, BucketWorkerReport, BucketWorkerCommand, BucketWorkerSlot, BucketKeyChunk,
+    ShardMemoryReport
+)
 
 
 class BucketWorker(WorkerBase, BucketBase):
@@ -72,8 +75,10 @@ class BucketWorker(WorkerBase, BucketBase):
         self.worker_status = 'reporting_merge'
         self.report_queue.put(BucketWorkerReport(
             worker_id=self.worker_id,
-            ShmSpec=self._shm_spec,
-            written=self.keys_written,
+            ShmRep=ShardMemoryReport(
+                ShmSpec=self._shm_spec,
+                written=self.keys_written
+            ),
             status='running',
             action='merge',
             message=f"Bucket Worker {self.worker_id} reporting ready for merge with {self.keys_written} keys",
@@ -118,8 +123,10 @@ class BucketWorker(WorkerBase, BucketBase):
         if not self.stop_event.is_set():
             self.report_queue.put(BucketWorkerReport(
                 worker_id=self.worker_id,
-                ShmSpec=self._shm_spec,
-                written=self.keys_written,
+                ShmRep=ShardMemoryReport(
+                    ShmSpec=self._shm_spec,
+                    written=self.keys_written
+                ),
                 status='complete',
                 message=f"Bucket Worker {self.worker_id} completed job with {self.keys_written} keys",
             ))
@@ -188,13 +195,13 @@ class BucketWorkerManager(WorkerManagerBase):
         if report.status == 'running':
             report_action = report.action
             if report_action == 'merge':
-                self._merge_bucket_keys(worker_id=report.worker_id, n_written=report.written)
+                self._merge_bucket_keys(worker_id=report.worker_id, n_written=report.ShmRep.written)
                 command_queue = self.worker_slots[report.worker_id].command_queue
                 command_queue.put(BucketWorkerCommand(
                     action='set_worker_status', kwargs={'status': 'ready'}
                 ))
             else: print(f'Bucket Worker {report.worker_id} reported unknown action: {report_action}, message: {report.message}')
-        elif report.status == 'complete': self._merge_bucket_keys(worker_id=report.worker_id, n_written=report.written)
+        elif report.status == 'complete': self._merge_bucket_keys(worker_id=report.worker_id, n_written=report.ShmRep.written)
         elif report.status == 'error': print(f'Bucket Worker {report.worker_id} reported error: {report.message}')
         else: raise RuntimeError(f'Bucket Worker {report.worker_id} reported unknown status: {report.status}, message: {report.message}')
 

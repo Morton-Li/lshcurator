@@ -52,8 +52,7 @@ class BucketWorkerCommand:
 
 @dataclass(slots=True, kw_only=True)
 class BucketWorkerReport(WorkerReport):
-    ShmSpec: ShardMemorySpec
-    written: int
+    ShmRep: ShardMemoryReport
     action: Literal['merge'] | None = None  # 请求主进程的动作，仅在 status='running' 时有效
 
     def __post_init__(self):
